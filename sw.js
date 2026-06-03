@@ -1,4 +1,4 @@
-const CACHE = 'haircard-v7';
+const CACHE = 'haircard-v9';
 const ASSETS = ['./', './index.html', './manifest.json', './sw.js', './icon.svg'];
 
 self.addEventListener('install', e => {

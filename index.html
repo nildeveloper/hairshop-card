@@ -248,7 +248,7 @@ const DB = (() => {
   let _db = null;
   const open = () => new Promise((ok, err) => {
     if (_db) return ok(_db);
-    const r = indexedDB.open('haircard_v1', 1);
+    const r = indexedDB.open('haircard_v1');
     r.onupgradeneeded = e => {
       const d = e.target.result;
       if (!d.objectStoreNames.contains('members')) d.createObjectStore('members', {keyPath:'id'});
@@ -404,47 +404,71 @@ const Cloud = (() => {
 
   // ── Merge: 按记录级别合并本地与远端，时间戳晚的赢 ────
   const merge = async (remote) => {
-    if (!remote) return;
-    // 合并墓碑：保留完整对象（含 type），取 deletedAt 较晚的
-    const remoteTombs = remote.deleted || [];
-    const localTombs = await DB.getAll('deleted').catch(() => []);
-    const tombMap = new Map(remoteTombs.map(t => [t.id, {...t}]));
-    localTombs.forEach(t => {
-      const existing = tombMap.get(t.id);
-      if (!existing || t.deletedAt > existing.deletedAt) tombMap.set(t.id, {...t});
-    });
+    if (!remote) return false;
+    window._merging = true;
+    try {
+      // 合并墓碑：保留完整对象（含 type），取 deletedAt 较晚的
+      const remoteTombs = remote.deleted || [];
+      const localTombs = await DB.getAll('deleted').catch(() => []);
+      const tombMap = new Map(remoteTombs.map(t => [t.id, {...t}]));
+      localTombs.forEach(t => {
+        const existing = tombMap.get(t.id);
+        if (!existing || t.deletedAt > existing.deletedAt) tombMap.set(t.id, {...t});
+      });
 
-    const delByType = (type) => new Set(
-      [...tombMap.values()].filter(t => t.type === type).map(t => t.id)
-    );
-    const delMemberIds = delByType('member');
-    const delCardIds = delByType('card');
-    const delTxnIds = delByType('txn');
+      const delByType = (type) => new Set(
+        [...tombMap.values()].filter(t => t.type === type).map(t => t.id)
+      );
+      const delMemberIds = delByType('member');
+      const delCardIds = delByType('card');
+      const delTxnIds = delByType('txn');
 
-    const [localMembers, localCards, localTxns] = await Promise.all([
-      DB.getAll('members'), DB.getAll('cards'), DB.getAll('txns')
-    ]);
+      const [localMembers, localCards, localTxns] = await Promise.all([
+        DB.getAll('members'), DB.getAll('cards'), DB.getAll('txns')
+      ]);
 
-    const mergeStore = async (store, localItems, remoteItems, delIds) => {
-      const lm = new Map(localItems.map(i => [i.id, i]));
-      for (const ri of (remoteItems || [])) {
-        if (delIds.has(ri.id)) continue;
-        const local = lm.get(ri.id);
-        if (!local) { await DB.put(store, ri); }
-        else if ((ri.updatedAt||ri.createdAt||0) > (local.updatedAt||local.createdAt||0)) { await DB.put(store, ri); }
+      const mergeStore = async (store, localItems, remoteItems, delIds) => {
+        const lm = new Map(localItems.map(i => [i.id, i]));
+        for (const ri of (remoteItems || [])) {
+          if (delIds.has(ri.id)) continue;
+          const local = lm.get(ri.id);
+          if (!local) { await DB.put(store, ri); }
+          else if ((ri.updatedAt||ri.createdAt||0) > (local.updatedAt||local.createdAt||0)) { await DB.put(store, ri); }
+        }
+        for (const [id] of lm) {
+          if (delIds.has(id)) await DB.del(store, id);
+        }
+      };
+
+      await mergeStore('members', localMembers, remote.members, delMemberIds);
+      await mergeStore('cards', localCards, remote.cards, delCardIds);
+      await mergeStore('txns', localTxns, remote.txns, delTxnIds);
+
+      // 保存合并后的墓碑（保留 type 字段）
+      for (const [, t] of tombMap) {
+        await DB.put('deleted', t);
       }
-      for (const [id] of lm) {
-        if (delIds.has(id)) await DB.del(store, id);
-      }
-    };
 
-    await mergeStore('members', localMembers, remote.members, delMemberIds);
-    await mergeStore('cards', localCards, remote.cards, delCardIds);
-    await mergeStore('txns', localTxns, remote.txns, delTxnIds);
+      // 清理过期墓碑：超过 30 天且对应记录确实不存在了
+      const cutoff = Date.now() - 30 * 86400000;
+      const [curMembers, curCards, curTxns] = await Promise.all([
+        DB.getAll('members'), DB.getAll('cards'), DB.getAll('txns')
+      ]);
+      const allIds = new Set([
+        ...curMembers.map(m=>m.id), ...curCards.map(c=>c.id), ...curTxns.map(t=>t.id)
+      ]);
+      const finalTombs = [...tombMap.values()].filter(t => {
+        if (t.deletedAt < cutoff && !allIds.has(t.id)) return false; // 已过期且记录不存在，丢弃
+        return true;
+      });
+      // 清空重建
+      const allDel = await DB.getAll('deleted').catch(()=>[]);
+      for (const old of allDel) await DB.del('deleted', old.id);
+      for (const t of finalTombs) await DB.put('deleted', t);
 
-    // 保存合并后的墓碑（保留 type 字段）
-    for (const [, t] of tombMap) {
-      await DB.put('deleted', t);
+      return true;
+    } finally {
+      window._merging = false;
     }
   };
 
@@ -513,17 +537,33 @@ const Cloud = (() => {
     push();
   };
   window.addEventListener('pagehide', flush);
-  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'hidden') flush();
+    else autoSync();
+  });
 
-  return { isOn, getCfg: () => cfg, push, pull, merge, schedulePush, setup, restore, disconnect, genShopKey };
+  // 页面可见时自动拉取远端并合并
+  const autoSync = async () => {
+    if (!isOn() || busy) return;
+    try {
+      const remote = await pull();
+      await merge(remote);
+      // 合并后刷新当前视图
+      if (typeof render === 'function') render();
+    } catch (e) {
+      console.warn('[cloud] autoSync failed', e);
+    }
+  };
+
+  return { isOn, getCfg: () => cfg, push, pull, merge, schedulePush, autoSync, setup, restore, disconnect, genShopKey };
 })();
 
-// 包裹 DB 的写操作，触发自动云同步
+// 包裹 DB 的写操作，触发自动云同步（merge 期间静默，避免多余 push）
 ['put','del'].forEach(m => {
   const orig = DB[m].bind(DB);
   DB[m] = async function(...args) {
     const r = await orig(...args);
-    Cloud.schedulePush();
+    if (!window._merging) Cloud.schedulePush();
     return r;
   };
 });
@@ -1148,8 +1188,8 @@ window.doImport = async function(e) {
 };
 
 // ── Init ───────────────────────────────────────────────────
-// 升级 DB schema（老用户增加 deleted store）
-DB.upgrade().then(() => render()).catch(() => render());
+// 升级 DB schema（老用户增加 deleted store），然后渲染 + 拉取云端
+DB.upgrade().then(() => { render(); Cloud.autoSync(); }).catch(() => { render(); Cloud.autoSync(); });
 
 // 同步指示器：失败状态点一下重试
 document.getElementById('cloud-indicator').addEventListener('click', e => {

@@ -6,7 +6,8 @@
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="default">
 <meta name="apple-mobile-web-app-title" content="次卡管理">
-<meta name="theme-color" content="#007AFF">
+<meta name="theme-color" content="#F9F9F9">
+<meta name="theme-color" content="#1C1C1E" media="(prefers-color-scheme: dark)">
 <link rel="manifest" href="./manifest.json">
 <link rel="apple-touch-icon" href="./icon.svg">
 <title>次卡管理 · 理发店</title>
@@ -167,6 +168,43 @@ body{
 .mt8{margin-top:8px}
 .mt16{margin-top:16px}
 .tip{margin:0 16px 16px;padding:14px;background:rgba(0,122,255,.08);border-radius:12px;font-size:13px;color:var(--blue);line-height:1.6}
+
+/* MODAL */
+.modal-mask{
+  position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.4);
+  display:flex;align-items:center;justify-content:center;padding:24px;
+  animation:fadein .18s ease;
+}
+@keyframes fadein{from{opacity:0}to{opacity:1}}
+.modal{
+  background:rgba(242,242,247,.96);backdrop-filter:blur(20px);-webkit-backdrop-filter:blur(20px);
+  border-radius:14px;width:100%;max-width:280px;overflow:hidden;
+  animation:modalin .22s cubic-bezier(.2,.9,.3,1.2);
+}
+@keyframes modalin{from{opacity:0;transform:scale(.86)}to{opacity:1;transform:scale(1)}}
+.modal-body{padding:18px 16px 14px;text-align:center}
+.modal-title{font-size:17px;font-weight:600;margin-bottom:4px}
+.modal-sub{font-size:13px;color:var(--text2);line-height:1.4;margin-bottom:14px}
+.modal-input{
+  width:100%;background:var(--white);border:.5px solid var(--sep);border-radius:8px;
+  padding:9px 11px;font-size:14px;color:var(--text);outline:none;font-family:inherit;
+  resize:none;line-height:1.4;
+}
+.modal-input:focus{border-color:var(--blue)}
+.modal-quick{display:flex;flex-wrap:wrap;gap:6px;margin-top:10px;justify-content:center}
+.modal-chip{
+  padding:5px 11px;background:rgba(0,122,255,.1);color:var(--blue);
+  border:none;border-radius:14px;font-size:13px;cursor:pointer;
+}
+.modal-chip:active{background:rgba(0,122,255,.22)}
+.modal-acts{display:flex;border-top:.5px solid rgba(0,0,0,.1)}
+.modal-act{
+  flex:1;padding:12px;background:none;border:none;font-size:17px;
+  color:var(--blue);cursor:pointer;font-family:inherit;
+}
+.modal-act.primary{font-weight:600}
+.modal-act:active{background:rgba(0,0,0,.06)}
+.modal-act + .modal-act{border-left:.5px solid rgba(0,0,0,.1)}
 </style>
 </head>
 <body>
@@ -298,6 +336,7 @@ function render() {
 async function vHome() {
   document.getElementById('app').innerHTML = `
     <div class="nav">
+      <span class="nav-btn" aria-hidden="true" style="visibility:hidden">+ 会员</span>
       <div class="nav-title">💈 次卡管理</div>
       <button class="nav-btn bold" style="text-align:right" onclick="navigate('addMember')">+ 会员</button>
     </div>
@@ -351,6 +390,7 @@ async function vMembers() {
 
   document.getElementById('app').innerHTML = `
     <div class="nav">
+      <span class="nav-btn" aria-hidden="true" style="visibility:hidden">+ 添加</span>
       <div class="nav-title">全部会员（${members.length}）</div>
       <button class="nav-btn bold" style="text-align:right" onclick="navigate('addMember')">+ 添加</button>
     </div>
@@ -456,17 +496,63 @@ async function vMember() {
     </div>`;
 }
 
+// ── Prompt Modal ───────────────────────────────────────────
+function promptNote({title, sub, placeholder, quick}) {
+  return new Promise(resolve => {
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask';
+    mask.innerHTML = `
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-body">
+          <div class="modal-title">${title}</div>
+          ${sub?`<div class="modal-sub">${sub}</div>`:''}
+          <textarea class="modal-input" id="m-note" rows="2" placeholder="${placeholder||'选填备注，如发型/项目'}" maxlength="60"></textarea>
+          ${quick&&quick.length?`<div class="modal-quick">${quick.map(q=>`<button type="button" class="modal-chip" data-q="${q}">${q}</button>`).join('')}</div>`:''}
+        </div>
+        <div class="modal-acts">
+          <button class="modal-act" data-act="cancel">取消</button>
+          <button class="modal-act primary" data-act="ok">确认划卡</button>
+        </div>
+      </div>`;
+    const close = v => { mask.remove(); resolve(v); };
+    mask.addEventListener('click', e => { if (e.target===mask) close(null); });
+    mask.querySelectorAll('.modal-chip').forEach(b => {
+      b.onclick = () => {
+        const ta = mask.querySelector('#m-note');
+        ta.value = ta.value ? ta.value+' '+b.dataset.q : b.dataset.q;
+        ta.focus();
+      };
+    });
+    mask.querySelector('[data-act="cancel"]').onclick = () => close(null);
+    mask.querySelector('[data-act="ok"]').onclick = () => {
+      const v = mask.querySelector('#m-note').value.trim();
+      close({note:v});
+    };
+    document.body.appendChild(mask);
+    setTimeout(()=>mask.querySelector('#m-note')?.focus(), 80);
+  });
+}
+
 window.doUse = async function(memberId) {
   const cards = await DB.byIdx('cards','mid',memberId);
   const card = cards.filter(c=>c.total>c.used).sort((a,b)=>a.createdAt-b.createdAt)[0];
   if (!card) { toast('没有剩余次数'); return; }
 
+  const member = await DB.get('members', memberId);
+  const result = await promptNote({
+    title: '划卡消费',
+    sub: `${member.name} · 本次扣 1 次`,
+    placeholder: '选填备注，如：剪发 / 烫染',
+    quick: ['剪发','洗剪吹','烫发','染发','造型']
+  });
+  if (result === null) return;
+
   card.used += 1;
   const now = Date.now();
+  const note = result.note || '';
   await DB.put('cards', card);
-  await DB.put('txns', {id:uid(), memberId, cardId:card.id, type:'use', sessions:1, createdAt:now});
+  await DB.put('txns', {id:uid(), memberId, cardId:card.id, type:'use', sessions:1, note, createdAt:now});
 
-  const member = await DB.get('members', memberId);
   member.updatedAt = now;
   await DB.put('members', member);
 

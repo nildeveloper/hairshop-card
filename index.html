@@ -1,0 +1,646 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="次卡管理">
+<meta name="theme-color" content="#007AFF">
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./icon.svg">
+<title>次卡管理 · 理发店</title>
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{
+  --blue:#007AFF;--red:#FF3B30;--green:#34C759;--orange:#FF9500;--purple:#5856D6;
+  --bg:#F2F2F7;--white:#fff;--text:#1C1C1E;--text2:#8E8E93;--sep:#E5E5EA;
+  --st:env(safe-area-inset-top,0px);--sb:env(safe-area-inset-bottom,0px);
+}
+html,body{height:100%;overflow:hidden}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'PingFang SC','Helvetica Neue',sans-serif;
+  background:var(--bg);color:var(--text);
+  display:flex;flex-direction:column;
+}
+#app{flex:1;display:flex;flex-direction:column;overflow:hidden}
+
+/* NAV */
+.nav{
+  padding:calc(var(--st) + 10px) 8px 10px;
+  background:rgba(249,249,249,.94);
+  backdrop-filter:saturate(180%) blur(20px);
+  -webkit-backdrop-filter:saturate(180%) blur(20px);
+  border-bottom:.5px solid var(--sep);
+  display:flex;align-items:center;gap:4px;flex-shrink:0;
+}
+.nav-title{flex:1;font-size:17px;font-weight:600;text-align:center}
+.nav-btn{color:var(--blue);font-size:17px;background:none;border:none;padding:6px 10px;cursor:pointer;white-space:nowrap;min-width:62px}
+.nav-btn.bold{font-weight:700}
+.nav-btn:active{opacity:.5}
+
+/* PAGE */
+.page{flex:1;overflow-y:auto;-webkit-overflow-scrolling:touch;padding-bottom:calc(66px + var(--sb))}
+.page.notabs{padding-bottom:calc(16px + var(--sb))}
+
+/* TABS */
+#tabs{
+  position:fixed;bottom:0;left:0;right:0;z-index:50;
+  background:rgba(249,249,249,.94);
+  backdrop-filter:saturate(180%) blur(20px);
+  -webkit-backdrop-filter:saturate(180%) blur(20px);
+  border-top:.5px solid var(--sep);
+  display:flex;padding:8px 0 calc(var(--sb) + 2px);
+}
+.tab{flex:1;display:flex;flex-direction:column;align-items:center;gap:2px;border:none;background:none;cursor:pointer;padding:4px 0}
+.tab-ic{font-size:24px;line-height:1.2;transition:transform .12s}
+.tab-lb{font-size:10px;color:var(--text2)}
+.tab.on .tab-lb{color:var(--blue)}
+.tab:active .tab-ic{transform:scale(.8)}
+
+/* SECTION */
+.sec{padding:16px 16px 0}
+.sec-title{font-size:13px;color:var(--text2);margin-bottom:8px;padding-left:4px;font-weight:500}
+
+/* SEARCH */
+.search-wrap{padding:10px 16px;background:var(--bg)}
+.search-box{background:rgba(118,118,128,.12);border-radius:10px;display:flex;align-items:center;gap:8px;padding:7px 12px}
+.search-box input{flex:1;border:none;background:none;font-size:16px;color:var(--text);outline:none;caret-color:var(--blue)}
+
+/* LIST CARD */
+.lcard{background:var(--white);border-radius:12px;overflow:hidden;margin-bottom:16px}
+.lcard.mx{margin-left:16px;margin-right:16px}
+
+/* ROW */
+.row{display:flex;align-items:center;padding:13px 16px;border-bottom:.5px solid var(--bg)}
+.row:last-child{border-bottom:none}
+.row-lbl{font-size:15px;color:var(--text2);width:76px;flex-shrink:0}
+.row-val{flex:1;font-size:15px;text-align:right}
+
+/* MEMBER ITEM */
+.mi{display:flex;align-items:center;gap:12px;padding:13px 16px;background:var(--white);border-bottom:.5px solid var(--bg);cursor:pointer}
+.mi:active{background:#EBEBF0}
+.av{width:44px;height:44px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;justify-content:center;font-size:20px;font-weight:700;color:white;background:linear-gradient(135deg,var(--blue),var(--purple))}
+.mn{font-size:17px;font-weight:500}
+.mp{font-size:13px;color:var(--text2);margin-top:2px}
+.badge{padding:3px 10px;border-radius:20px;font-size:13px;font-weight:600;flex-shrink:0;margin-left:auto;background:rgba(52,199,89,.15);color:var(--green)}
+.badge.low{background:rgba(255,149,0,.15);color:var(--orange)}
+.badge.out{background:rgba(255,59,48,.12);color:var(--red)}
+
+/* PUNCH CARD */
+.pcard{
+  margin:16px;border-radius:18px;padding:22px;
+  background:linear-gradient(135deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%);
+  color:white;position:relative;overflow:hidden;
+  box-shadow:0 8px 32px rgba(0,0,0,.25);
+}
+.pcard::after{content:'✂';position:absolute;right:-10px;top:-10px;font-size:90px;opacity:.06;transform:rotate(-30deg);pointer-events:none}
+.pc-shop{font-size:11px;opacity:.55;margin-bottom:14px;letter-spacing:1px;font-weight:500}
+.pc-num{font-size:54px;font-weight:800;line-height:1;letter-spacing:-2px}
+.pc-unit{font-size:14px;opacity:.65;margin-top:4px}
+.pc-line{height:.5px;background:rgba(255,255,255,.2);margin:16px 0}
+.pc-stats{display:grid;grid-template-columns:1fr 1fr 1fr}
+.pc-s-lbl{font-size:11px;opacity:.55;margin-bottom:4px}
+.pc-s-val{font-size:16px;font-weight:700}
+.gold{color:#FFD60A}
+
+/* BUTTONS */
+.btn{display:block;width:100%;padding:15px;border:none;border-radius:13px;font-size:17px;font-weight:600;cursor:pointer;text-align:center}
+.btn:active{opacity:.75;transform:scale(.98)}
+.btn-blue{background:var(--blue);color:white}
+.btn-red{background:var(--red);color:white}
+.btn-outline{background:var(--white);color:var(--blue);border:1.5px solid var(--blue)}
+.btn-gray{background:rgba(142,142,147,.15);color:var(--text)}
+
+/* FORM */
+.fcard{background:var(--white);border-radius:12px;overflow:hidden;margin-bottom:16px}
+.fr{display:flex;align-items:center;padding:13px 16px;border-bottom:.5px solid var(--bg)}
+.fr:last-child{border-bottom:none}
+.fl{font-size:15px;color:var(--text2);width:76px;flex-shrink:0}
+.fi{flex:1;font-size:16px;border:none;background:none;outline:none;color:var(--text);text-align:right;caret-color:var(--blue)}
+.fi::placeholder{color:#C7C7CC}
+
+/* QUICK GRID */
+.qgrid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:16px}
+.qbtn{padding:13px 8px;background:var(--white);border:none;border-radius:10px;font-size:15px;font-weight:500;cursor:pointer;color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.07)}
+.qbtn:active{background:var(--sep)}
+
+/* TXN */
+.ti{display:flex;align-items:center;gap:12px;padding:13px 16px;border-bottom:.5px solid var(--bg)}
+.ti:last-child{border-bottom:none}
+.tic{width:38px;height:38px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:17px;flex-shrink:0}
+.tic.use{background:rgba(255,59,48,.1)}
+.tic.charge{background:rgba(52,199,89,.1)}
+.tt{flex:1;min-width:0}
+.ttitle{font-size:15px}
+.ttime{font-size:12px;color:var(--text2);margin-top:2px}
+.tamt{font-size:15px;font-weight:600;flex-shrink:0}
+.tamt.use{color:var(--red)}
+.tamt.charge{color:var(--green)}
+
+/* CARD RECORD ROW */
+.cr{display:flex;align-items:center;padding:13px 16px;border-bottom:.5px solid var(--bg)}
+.cr:last-child{border-bottom:none}
+.cr-left{flex:1}
+.cr-name{font-size:15px;font-weight:500}
+.cr-sub{font-size:12px;color:var(--text2);margin-top:3px}
+.cr-right{text-align:right;flex-shrink:0}
+.cr-remain{font-size:18px;font-weight:700}
+.cr-remain.done{color:var(--text2)}
+.cr-used{font-size:12px;color:var(--text2);margin-top:2px}
+
+/* EMPTY */
+.empty{text-align:center;padding:80px 32px}
+.empty-ic{font-size:56px;opacity:.35;margin-bottom:16px}
+.empty-t{font-size:17px;font-weight:500}
+.empty-s{font-size:14px;color:var(--text2);margin-top:6px;line-height:1.5}
+
+/* TOAST */
+.toast{
+  position:fixed;left:50%;top:calc(var(--st) + 58px);transform:translateX(-50%);
+  background:rgba(0,0,0,.78);color:white;padding:10px 22px;border-radius:22px;
+  font-size:15px;z-index:999;white-space:nowrap;pointer-events:none;
+  animation:tin .2s ease;
+}
+@keyframes tin{from{opacity:0;transform:translate(-50%,-6px)}to{opacity:1;transform:translate(-50%,0)}}
+
+.mt8{margin-top:8px}
+.mt16{margin-top:16px}
+.tip{margin:0 16px 16px;padding:14px;background:rgba(0,122,255,.08);border-radius:12px;font-size:13px;color:var(--blue);line-height:1.6}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<nav id="tabs">
+  <button class="tab on" id="tab-home" onclick="goTab('home')">
+    <span class="tab-ic">🔍</span><span class="tab-lb">查找</span>
+  </button>
+  <button class="tab" id="tab-members" onclick="goTab('members')">
+    <span class="tab-ic">👥</span><span class="tab-lb">会员</span>
+  </button>
+  <button class="tab" id="tab-backup" onclick="goTab('backup')">
+    <span class="tab-ic">☁️</span><span class="tab-lb">备份</span>
+  </button>
+</nav>
+<script>
+'use strict';
+
+// ── IndexedDB ──────────────────────────────────────────────
+const DB = (() => {
+  let _db = null;
+  const open = () => new Promise((ok, err) => {
+    if (_db) return ok(_db);
+    const r = indexedDB.open('haircard_v1', 1);
+    r.onupgradeneeded = e => {
+      const d = e.target.result;
+      if (!d.objectStoreNames.contains('members')) d.createObjectStore('members', {keyPath:'id'});
+      if (!d.objectStoreNames.contains('cards')) {
+        const cs = d.createObjectStore('cards', {keyPath:'id'});
+        cs.createIndex('mid','memberId');
+      }
+      if (!d.objectStoreNames.contains('txns')) {
+        const ts = d.createObjectStore('txns', {keyPath:'id'});
+        ts.createIndex('mid','memberId');
+      }
+    };
+    r.onsuccess = e => { _db = e.target.result; ok(_db); };
+    r.onerror = () => err(r.error);
+  });
+
+  const run = async (stores, mode, fn) => {
+    const d = await open();
+    return new Promise((ok, err) => {
+      const tx = d.transaction(stores, mode);
+      tx.onerror = () => err(tx.error);
+      fn(tx, ok);
+    });
+  };
+
+  return {
+    getAll: store => run([store],'readonly',(tx,ok) => { const r=tx.objectStore(store).getAll(); r.onsuccess=()=>ok(r.result); }),
+    get: (store,id) => run([store],'readonly',(tx,ok) => { const r=tx.objectStore(store).get(id); r.onsuccess=()=>ok(r.result); }),
+    put: (store,obj) => run([store],'readwrite',(tx,ok) => { const r=tx.objectStore(store).put(obj); r.onsuccess=()=>ok(); }),
+    del: (store,id) => run([store],'readwrite',(tx,ok) => { const r=tx.objectStore(store).delete(id); r.onsuccess=()=>ok(); }),
+    byIdx: (store,idx,val) => run([store],'readonly',(tx,ok) => { const r=tx.objectStore(store).index(idx).getAll(val); r.onsuccess=()=>ok(r.result); }),
+
+    async exportAll() {
+      const [members,cards,txns] = await Promise.all([this.getAll('members'),this.getAll('cards'),this.getAll('txns')]);
+      return {v:1, exportedAt:Date.now(), members, cards, txns};
+    },
+    async importAll(data) {
+      const d = await open();
+      return new Promise((ok,err) => {
+        const tx = d.transaction(['members','cards','txns'],'readwrite');
+        ['members','cards','txns'].forEach(s => tx.objectStore(s).clear());
+        (data.members||[]).forEach(m => tx.objectStore('members').put(m));
+        (data.cards||[]).forEach(c => tx.objectStore('cards').put(c));
+        (data.txns||[]).forEach(t => tx.objectStore('txns').put(t));
+        tx.oncomplete = ok;
+        tx.onerror = () => err(tx.error);
+      });
+    }
+  };
+})();
+
+// ── Utils ──────────────────────────────────────────────────
+const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+
+function fmtFull(ts) {
+  const d = new Date(ts);
+  return `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+}
+
+function fmtShort(ts) {
+  const d = new Date(ts), now = new Date();
+  if (d.toDateString()===now.toDateString())
+    return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');
+  if (d.getFullYear()===now.getFullYear())
+    return `${d.getMonth()+1}月${d.getDate()}日`;
+  return `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()}`;
+}
+
+let _toast = null;
+function toast(msg) {
+  if (_toast) _toast.remove();
+  _toast = document.createElement('div');
+  _toast.className = 'toast';
+  _toast.textContent = msg;
+  document.body.appendChild(_toast);
+  setTimeout(()=>{ if(_toast){_toast.style.opacity='0';_toast.style.transition='opacity .3s';setTimeout(()=>_toast&&_toast.remove(),300);} }, 2200);
+}
+
+// ── Router ─────────────────────────────────────────────────
+let curView = 'home', curParams = {}, stack = [];
+const MAIN_VIEWS = ['home','members','backup'];
+
+function goTab(view) { stack=[]; navigate(view,{},false); }
+function goBack() { const p=stack.pop(); if(p) navigate(p.view,p.params,false); else goTab('home'); }
+
+function navigate(view, params={}, push=true) {
+  if (push) stack.push({view:curView, params:curParams});
+  curView = view; curParams = params;
+  render();
+}
+
+// ── Render ─────────────────────────────────────────────────
+function render() {
+  const isMain = MAIN_VIEWS.includes(curView);
+  document.getElementById('tabs').style.display = isMain ? 'flex' : 'none';
+  MAIN_VIEWS.forEach(v => {
+    const el = document.getElementById('tab-'+v);
+    if (el) el.className = 'tab' + (curView===v?' on':'');
+  });
+  const views = {home:vHome, members:vMembers, member:vMember, addMember:vAddMember, addCard:vAddCard, backup:vBackup};
+  (views[curView]||vHome)();
+}
+
+// ── View: Home ─────────────────────────────────────────────
+async function vHome() {
+  document.getElementById('app').innerHTML = `
+    <div class="nav">
+      <div class="nav-title">💈 次卡管理</div>
+      <button class="nav-btn bold" style="text-align:right" onclick="navigate('addMember')">+ 会员</button>
+    </div>
+    <div class="page" id="pg">
+      <div class="search-wrap">
+        <div class="search-box">
+          <span style="color:#8E8E93;font-size:15px">🔍</span>
+          <input id="srch" type="text" placeholder="搜姓名或手机号…" autocomplete="off" oninput="doSearch(this.value)">
+        </div>
+      </div>
+      <div id="mlist"></div>
+    </div>`;
+  await loadList('');
+  const s = document.getElementById('srch'); if(s) s.focus();
+}
+
+window.doSearch = async q => loadList(q);
+
+async function loadList(q) {
+  const [members, cards] = await Promise.all([DB.getAll('members'), DB.getAll('cards')]);
+  const stats = {};
+  cards.forEach(c => { stats[c.memberId] = (stats[c.memberId]||0) + (c.total-c.used); });
+  const list = q
+    ? members.filter(m => m.name.includes(q) || (m.phone&&m.phone.includes(q)))
+    : members;
+  list.sort((a,b) => (b.updatedAt||b.createdAt) - (a.updatedAt||a.createdAt));
+
+  const el = document.getElementById('mlist');
+  if (!el) return;
+  if (!list.length) {
+    el.innerHTML = `<div class="empty"><div class="empty-ic">💈</div><div class="empty-t">${q?'没找到':'还没有会员'}</div><div class="empty-s">${q?'换个关键词试试':'点右上角 + 号添加第一位会员'}</div></div>`;
+    return;
+  }
+  el.innerHTML = `<div class="lcard mx">` + list.map(m => {
+    const r = stats[m.id]||0;
+    const bc = r===0?'out':r<=3?'low':'';
+    return `<div class="mi" onclick="navigate('member',{id:'${m.id}'})">
+      <div class="av">${m.name[0]}</div>
+      <div style="flex:1"><div class="mn">${m.name}</div>${m.phone?`<div class="mp">${m.phone}</div>`:''}</div>
+      <span class="badge ${bc}">${r}次</span>
+    </div>`;
+  }).join('') + '</div>';
+}
+
+// ── View: Members ──────────────────────────────────────────
+async function vMembers() {
+  const [members, cards] = await Promise.all([DB.getAll('members'), DB.getAll('cards')]);
+  const stats = {};
+  cards.forEach(c => { stats[c.memberId] = (stats[c.memberId]||0) + (c.total-c.used); });
+  members.sort((a,b) => a.name.localeCompare(b.name,'zh'));
+
+  document.getElementById('app').innerHTML = `
+    <div class="nav">
+      <div class="nav-title">全部会员（${members.length}）</div>
+      <button class="nav-btn bold" style="text-align:right" onclick="navigate('addMember')">+ 添加</button>
+    </div>
+    <div class="page">
+      ${!members.length
+        ? `<div class="empty"><div class="empty-ic">👥</div><div class="empty-t">还没有会员</div></div>`
+        : `<div class="lcard mx mt16">` + members.map(m => {
+            const r = stats[m.id]||0;
+            const bc = r===0?'out':r<=3?'low':'';
+            return `<div class="mi" onclick="navigate('member',{id:'${m.id}'})">
+              <div class="av">${m.name[0]}</div>
+              <div style="flex:1"><div class="mn">${m.name}</div>${m.phone?`<div class="mp">${m.phone}</div>`:''}</div>
+              <span class="badge ${bc}">${r}次</span>
+            </div>`;
+          }).join('') + '</div>'
+      }
+    </div>`;
+}
+
+// ── View: Member Detail ────────────────────────────────────
+async function vMember() {
+  const {id} = curParams;
+  const member = await DB.get('members', id);
+  if (!member) { goTab('home'); return; }
+
+  const [cards, txns] = await Promise.all([DB.byIdx('cards','mid',id), DB.byIdx('txns','mid',id)]);
+  txns.sort((a,b)=>b.createdAt-a.createdAt);
+  const activeCards = cards.filter(c=>c.total>c.used).sort((a,b)=>a.createdAt-b.createdAt);
+  const totalRemain = cards.reduce((s,c)=>s+(c.total-c.used),0);
+  const totalCharged = cards.reduce((s,c)=>s+c.total,0);
+  const totalUsed = cards.reduce((s,c)=>s+c.used,0);
+  const totalPaid = cards.reduce((s,c)=>s+(c.paid||0),0);
+
+  document.getElementById('app').innerHTML = `
+    <div class="nav">
+      <button class="nav-btn" onclick="goBack()">‹ 返回</button>
+      <div class="nav-title">${member.name}</div>
+      <button class="nav-btn bold" style="text-align:right" onclick="navigate('addCard',{memberId:'${id}'})">开次卡</button>
+    </div>
+    <div class="page notabs">
+
+      <div class="pcard">
+        <div class="pc-shop">理发店会员卡${member.phone?' · '+member.phone:''}</div>
+        <div class="pc-num">${totalRemain}</div>
+        <div class="pc-unit">剩余次数</div>
+        <div class="pc-line"></div>
+        <div class="pc-stats">
+          <div><div class="pc-s-lbl">累计充次</div><div class="pc-s-val">${totalCharged}</div></div>
+          <div><div class="pc-s-lbl">已消费</div><div class="pc-s-val">${totalUsed}</div></div>
+          <div><div class="pc-s-lbl">充值金额</div><div class="pc-s-val gold">¥${totalPaid}</div></div>
+        </div>
+      </div>
+
+      <div class="sec">
+        ${totalRemain>0
+          ? `<button class="btn btn-blue" onclick="doUse('${id}')">✂️ &nbsp; 划卡消费（-1 次）</button>`
+          : `<button class="btn btn-outline" onclick="navigate('addCard',{memberId:'${id}'})">次数已用完，点此开新次卡</button>`
+        }
+      </div>
+
+      ${cards.length ? `
+        <div class="sec mt8">
+          <div class="sec-title">次卡明细</div>
+          <div class="lcard">
+            ${cards.sort((a,b)=>b.createdAt-a.createdAt).map(c=>{
+              const r=c.total-c.used;
+              return `<div class="cr">
+                <div class="cr-left">
+                  <div class="cr-name">${c.total}次卡${c.paid?'（¥'+c.paid+'）':''}</div>
+                  <div class="cr-sub">${fmtFull(c.createdAt)}${c.note?' · '+c.note:''}</div>
+                </div>
+                <div class="cr-right">
+                  <div class="cr-remain${r===0?' done':''}">剩 ${r} 次</div>
+                  <div class="cr-used">已用 ${c.used} 次</div>
+                </div>
+              </div>`;
+            }).join('')}
+          </div>
+        </div>
+      ` : ''}
+
+      ${txns.length ? `
+        <div class="sec mt8">
+          <div class="sec-title">操作记录</div>
+          <div class="lcard">
+            ${txns.slice(0,50).map(t=>`
+              <div class="ti">
+                <div class="tic ${t.type}">${t.type==='use'?'✂️':'💳'}</div>
+                <div class="tt">
+                  <div class="ttitle">${t.type==='use'?'划卡消费':('充值 '+t.sessions+' 次'+(t.paid?'（¥'+t.paid+'）':''))}</div>
+                  <div class="ttime">${fmtFull(t.createdAt)}${t.note?' · '+t.note:''}</div>
+                </div>
+                <div class="tamt ${t.type}">${t.type==='use'?'-1 次':'+'+t.sessions+' 次'}</div>
+              </div>
+            `).join('')}
+          </div>
+        </div>
+      ` : ''}
+
+      <div class="sec mt8" style="padding-bottom:24px">
+        <button class="btn btn-red" onclick="doDelete('${id}')">删除此会员</button>
+      </div>
+    </div>`;
+}
+
+window.doUse = async function(memberId) {
+  const cards = await DB.byIdx('cards','mid',memberId);
+  const card = cards.filter(c=>c.total>c.used).sort((a,b)=>a.createdAt-b.createdAt)[0];
+  if (!card) { toast('没有剩余次数'); return; }
+
+  card.used += 1;
+  const now = Date.now();
+  await DB.put('cards', card);
+  await DB.put('txns', {id:uid(), memberId, cardId:card.id, type:'use', sessions:1, createdAt:now});
+
+  const member = await DB.get('members', memberId);
+  member.updatedAt = now;
+  await DB.put('members', member);
+
+  const all = await DB.byIdx('cards','mid',memberId);
+  const remain = all.reduce((s,c)=>s+(c.total-c.used),0);
+  toast(remain<=3 && remain>0 ? `已划卡！仅剩 ${remain} 次，建议续卡 🔔` : `划卡成功！剩余 ${remain} 次`);
+  vMember();
+};
+
+window.doDelete = async function(id) {
+  if (!confirm('确认删除此会员及全部记录？此操作不可恢复。')) return;
+  const [cards, txns] = await Promise.all([DB.byIdx('cards','mid',id), DB.byIdx('txns','mid',id)]);
+  await DB.del('members', id);
+  await Promise.all([...cards.map(c=>DB.del('cards',c.id)), ...txns.map(t=>DB.del('txns',t.id))]);
+  toast('已删除');
+  goTab('home');
+};
+
+// ── View: Add Member ───────────────────────────────────────
+function vAddMember() {
+  document.getElementById('app').innerHTML = `
+    <div class="nav">
+      <button class="nav-btn" onclick="goBack()">取消</button>
+      <div class="nav-title">新建会员</div>
+      <button class="nav-btn bold" style="text-align:right" onclick="saveNewMember()">保存</button>
+    </div>
+    <div class="page notabs">
+      <div class="sec" style="padding-top:20px">
+        <div class="fcard">
+          <div class="fr"><label class="fl">姓名</label><input class="fi" id="f-name" placeholder="必填" type="text" autocomplete="off"></div>
+          <div class="fr"><label class="fl">手机号</label><input class="fi" id="f-phone" placeholder="选填" type="tel"></div>
+        </div>
+
+        <div class="sec-title mt8">顺带开次卡（可跳过）</div>
+        <div class="fcard">
+          <div class="fr"><label class="fl">次数</label><input class="fi" id="f-sessions" placeholder="如：10" type="number" min="1"></div>
+          <div class="fr"><label class="fl">实收 ¥</label><input class="fi" id="f-paid" placeholder="如：200" type="number" min="0"></div>
+          <div class="fr"><label class="fl">备注</label><input class="fi" id="f-note" placeholder="选填" type="text"></div>
+        </div>
+      </div>
+    </div>`;
+  setTimeout(()=>{const i=document.getElementById('f-name');if(i)i.focus();},100);
+}
+
+window.saveNewMember = async function() {
+  const name = (document.getElementById('f-name')?.value||'').trim();
+  if (!name) { toast('请填写姓名'); return; }
+  const now = Date.now();
+  const member = {id:uid(), name, phone:(document.getElementById('f-phone')?.value||'').trim(), createdAt:now, updatedAt:now};
+  await DB.put('members', member);
+
+  const sessions = parseInt(document.getElementById('f-sessions')?.value)||0;
+  if (sessions>0) {
+    const paid = parseFloat(document.getElementById('f-paid')?.value)||0;
+    const note = (document.getElementById('f-note')?.value||'').trim();
+    const card = {id:uid(), memberId:member.id, total:sessions, used:0, paid, note, createdAt:now};
+    await DB.put('cards', card);
+    await DB.put('txns', {id:uid(), memberId:member.id, cardId:card.id, type:'charge', sessions, paid, note, createdAt:now});
+  }
+  toast('已添加');
+  stack = [];
+  navigate('member', {id:member.id}, false);
+};
+
+// ── View: Add Card ─────────────────────────────────────────
+async function vAddCard() {
+  const {memberId} = curParams;
+  const member = await DB.get('members', memberId);
+  document.getElementById('app').innerHTML = `
+    <div class="nav">
+      <button class="nav-btn" onclick="goBack()">取消</button>
+      <div class="nav-title">开次卡 · ${member?.name||''}</div>
+      <button class="nav-btn bold" style="text-align:right" onclick="saveCard('${memberId}')">保存</button>
+    </div>
+    <div class="page notabs">
+      <div class="sec" style="padding-top:20px">
+        <div class="sec-title">快速选次数</div>
+        <div class="qgrid">
+          ${[5,10,15,20,30,50].map(n=>`<button class="qbtn" onclick="setN(${n})">${n}次</button>`).join('')}
+        </div>
+        <div class="fcard">
+          <div class="fr"><label class="fl">次数</label><input class="fi" id="c-sessions" placeholder="请输入" type="number" min="1"></div>
+          <div class="fr"><label class="fl">实收 ¥</label><input class="fi" id="c-paid" placeholder="实收金额" type="number" min="0"></div>
+          <div class="fr"><label class="fl">备注</label><input class="fi" id="c-note" placeholder="选填" type="text"></div>
+        </div>
+      </div>
+    </div>`;
+}
+
+window.setN = n => { const i=document.getElementById('c-sessions'); if(i) i.value=n; };
+
+window.saveCard = async function(memberId) {
+  const sessions = parseInt(document.getElementById('c-sessions')?.value)||0;
+  if (sessions<=0) { toast('请输入次数'); return; }
+  const paid = parseFloat(document.getElementById('c-paid')?.value)||0;
+  const note = (document.getElementById('c-note')?.value||'').trim();
+  const now = Date.now();
+  const card = {id:uid(), memberId, total:sessions, used:0, paid, note, createdAt:now};
+  await DB.put('cards', card);
+  await DB.put('txns', {id:uid(), memberId, cardId:card.id, type:'charge', sessions, paid, note, createdAt:now});
+  const member = await DB.get('members', memberId);
+  if (member) { member.updatedAt=now; await DB.put('members',member); }
+  toast(`已开 ${sessions} 次卡！`);
+  stack = [];
+  navigate('member', {id:memberId}, false);
+};
+
+// ── View: Backup ───────────────────────────────────────────
+async function vBackup() {
+  const [members,cards,txns] = await Promise.all([DB.getAll('members'),DB.getAll('cards'),DB.getAll('txns')]);
+  document.getElementById('app').innerHTML = `
+    <div class="nav"><div class="nav-title">备份与恢复</div></div>
+    <div class="page">
+      <div class="sec" style="padding-top:20px">
+        <div class="lcard">
+          <div class="row"><span class="row-lbl">会员数</span><span class="row-val">${members.length} 人</span></div>
+          <div class="row"><span class="row-lbl">次卡数</span><span class="row-val">${cards.length} 张</span></div>
+          <div class="row"><span class="row-lbl">划卡次数</span><span class="row-val">${txns.filter(t=>t.type==='use').length} 次</span></div>
+          <div class="row"><span class="row-lbl">收款总额</span><span class="row-val" style="color:var(--green);font-weight:700">¥${cards.reduce((s,c)=>s+(c.paid||0),0)}</span></div>
+        </div>
+
+        <button class="btn btn-blue mt16" onclick="doExport()">📤 &nbsp; 导出备份文件（.json）</button>
+
+        <div class="sec-title" style="margin-top:24px">从文件恢复数据</div>
+        <div class="lcard">
+          <div style="padding:16px">
+            <input type="file" id="imp" accept=".json" style="width:100%;font-size:15px" onchange="doImport(event)">
+            <div style="font-size:13px;color:var(--text2);margin-top:10px;line-height:1.5">
+              选择之前导出的 .json 文件。<br>⚠️ 导入会覆盖当前全部数据，请谨慎操作。
+            </div>
+          </div>
+        </div>
+
+        <div class="tip" style="margin-top:8px">
+          💡 建议：每周导出一次，把备份文件发到微信「文件传输助手」或存入「文件」App → iCloud Drive，防止手机出问题数据丢失。
+        </div>
+      </div>
+    </div>`;
+}
+
+window.doExport = async function() {
+  const data = await DB.exportAll();
+  const blob = new Blob([JSON.stringify(data,null,2)],{type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `次卡备份_${new Date().toLocaleDateString('zh-CN').replace(/\//g,'-')}.json`;
+  a.click();
+  URL.revokeObjectURL(url);
+  toast('导出成功 ✓');
+};
+
+window.doImport = async function(e) {
+  const file = e.target.files[0]; if(!file) return;
+  let data;
+  try { data = JSON.parse(await file.text()); } catch { toast('文件格式有误'); return; }
+  if (!Array.isArray(data.members)) { toast('不是有效备份文件'); return; }
+  const cur = await DB.getAll('members');
+  if (!confirm(`确认导入？将覆盖当前 ${cur.length} 个会员的全部数据，恢复为备份文件中的 ${data.members.length} 个会员。`)) return;
+  await DB.importAll(data);
+  toast(`已恢复 ${data.members.length} 个会员 ✓`);
+  goTab('home');
+};
+
+// ── Init ───────────────────────────────────────────────────
+render();
+
+// ── Service Worker 注册 ────────────────────────────────────
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('./sw.js')
+      .catch(() => {}); // 静默失败不影响使用
+  });
+}
+</script>
+</body>
+</html>

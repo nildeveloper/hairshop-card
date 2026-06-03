@@ -281,18 +281,46 @@ const DB = (() => {
     del: (store,id) => run([store],'readwrite',(tx,ok) => { const r=tx.objectStore(store).delete(id); r.onsuccess=()=>ok(); }),
     byIdx: (store,idx,val) => run([store],'readonly',(tx,ok) => { const r=tx.objectStore(store).index(idx).getAll(val); r.onsuccess=()=>ok(r.result); }),
 
+    async upgrade() {
+      const d = await open();
+      if (d.objectStoreNames.contains('deleted')) return;
+      return new Promise((ok, err) => {
+        d.close(); _db = null;
+        const r = indexedDB.open('haircard_v1', (d.version||1)+1);
+        r.onupgradeneeded = e => e.target.result.createObjectStore('deleted',{keyPath:'id'});
+        r.onsuccess = e => { _db = e.target.result; ok(); };
+        r.onerror = () => err(r.error);
+      });
+    },
+
     async exportAll() {
-      const [members,cards,txns] = await Promise.all([this.getAll('members'),this.getAll('cards'),this.getAll('txns')]);
-      return {v:1, exportedAt:Date.now(), members, cards, txns};
+      const [members,cards,txns,deleted] = await Promise.all([
+        this.getAll('members'),this.getAll('cards'),this.getAll('txns'),
+        this.getAll('deleted').catch(()=>[])
+      ]);
+      return {v:1, exportedAt:Date.now(), members, cards, txns, deleted};
     },
     async importAll(data) {
       const d = await open();
+      // 确保 deleted store 存在
+      if (!d.objectStoreNames.contains('deleted')) {
+        await new Promise((ok,err) => {
+          d.close(); _db = null;
+          const r = indexedDB.open('haircard_v1', (d.version||1)+1);
+          r.onupgradeneeded = e => e.target.result.createObjectStore('deleted',{keyPath:'id'});
+          r.onsuccess = e => { _db = e.target.result; ok(); };
+          r.onerror = () => err(r.error);
+        });
+      }
+      const nd = await open();
       return new Promise((ok,err) => {
-        const tx = d.transaction(['members','cards','txns'],'readwrite');
-        ['members','cards','txns'].forEach(s => tx.objectStore(s).clear());
+        const stores = ['members','cards','txns','deleted'];
+        const tx = nd.transaction(stores,'readwrite');
+        stores.forEach(s => tx.objectStore(s).clear());
         (data.members||[]).forEach(m => tx.objectStore('members').put(m));
         (data.cards||[]).forEach(c => tx.objectStore('cards').put(c));
         (data.txns||[]).forEach(t => tx.objectStore('txns').put(t));
+        (data.deleted||[]).forEach(d => tx.objectStore('deleted').put(d));
         tx.oncomplete = ok;
         tx.onerror = () => err(tx.error);
       });
@@ -338,15 +366,105 @@ const Cloud = (() => {
     }
   };
 
+  // ── gzip 压缩/解压工具 ─────────────────────────────────
+  const gzip = async (str) => {
+    const blob = new Blob([str]);
+    const cs = new CompressionStream('gzip');
+    const stream = blob.stream().pipeThrough(cs);
+    return new Blob([await new Response(stream).arrayBuffer()]);
+  };
+
+  const gunzip = async (blob) => {
+    const ds = new DecompressionStream('gzip');
+    const stream = blob.stream().pipeThrough(ds);
+    return new Response(stream).text();
+  };
+
+  // 解码远端响应（自动识别压缩/明文）
+  const _decode = async (resp) => {
+    const blob = await resp.blob();
+    const text = blob.type === 'application/octet-stream' ? await gunzip(blob) : await blob.text();
+    return JSON.parse(text);
+  };
+
+  // ── Pull: 拉取远端数据 ──────────────────────────────────
+  const pull = async () => {
+    if (!isOn()) return null;
+    try {
+      const r = await fetch(`${ENDPOINT}?key=${cfg.hashedKey}`);
+      if (r.status === 404) return null;
+      if (!r.ok) return null;
+      const j = await _decode(r);
+      return j.data || null;
+    } catch (e) {
+      console.warn('[cloud] pull failed', e);
+      return null;
+    }
+  };
+
+  // ── Merge: 按记录级别合并本地与远端，时间戳晚的赢 ────
+  const merge = async (remote) => {
+    if (!remote) return;
+    // 合并墓碑：保留完整对象（含 type），取 deletedAt 较晚的
+    const remoteTombs = remote.deleted || [];
+    const localTombs = await DB.getAll('deleted').catch(() => []);
+    const tombMap = new Map(remoteTombs.map(t => [t.id, {...t}]));
+    localTombs.forEach(t => {
+      const existing = tombMap.get(t.id);
+      if (!existing || t.deletedAt > existing.deletedAt) tombMap.set(t.id, {...t});
+    });
+
+    const delByType = (type) => new Set(
+      [...tombMap.values()].filter(t => t.type === type).map(t => t.id)
+    );
+    const delMemberIds = delByType('member');
+    const delCardIds = delByType('card');
+    const delTxnIds = delByType('txn');
+
+    const [localMembers, localCards, localTxns] = await Promise.all([
+      DB.getAll('members'), DB.getAll('cards'), DB.getAll('txns')
+    ]);
+
+    const mergeStore = async (store, localItems, remoteItems, delIds) => {
+      const lm = new Map(localItems.map(i => [i.id, i]));
+      for (const ri of (remoteItems || [])) {
+        if (delIds.has(ri.id)) continue;
+        const local = lm.get(ri.id);
+        if (!local) { await DB.put(store, ri); }
+        else if ((ri.updatedAt||ri.createdAt||0) > (local.updatedAt||local.createdAt||0)) { await DB.put(store, ri); }
+      }
+      for (const [id] of lm) {
+        if (delIds.has(id)) await DB.del(store, id);
+      }
+    };
+
+    await mergeStore('members', localMembers, remote.members, delMemberIds);
+    await mergeStore('cards', localCards, remote.cards, delCardIds);
+    await mergeStore('txns', localTxns, remote.txns, delTxnIds);
+
+    // 保存合并后的墓碑（保留 type 字段）
+    for (const [, t] of tombMap) {
+      await DB.put('deleted', t);
+    }
+  };
+
+  // ── Push: 先 pull 合并，再上传 ──────────────────────────
   const push = async () => {
     if (!isOn() || busy) return false;
     busy = true;
     setStatus('syncing', '同步中…');
     try {
+      // 1. 拉取远端数据并合并
+      const remote = await pull();
+      await merge(remote);
+      // 2. 导出合并后的数据并上传
       const data = await DB.exportAll();
-      const body = JSON.stringify({data, modifiedAt: Date.now(), v: 1});
+      const jsonStr = JSON.stringify({data, modifiedAt: Date.now(), v: 1});
+      const compressed = await gzip(jsonStr);
       const r = await fetch(`${ENDPOINT}?key=${cfg.hashedKey}`, {
-        method:'PUT', headers:{'content-type':'application/json'}, body
+        method:'PUT',
+        headers:{'content-type':'application/octet-stream'},
+        body: compressed
       });
       if (!r.ok) throw new Error('http '+r.status);
       cfg.lastSync = Date.now();
@@ -379,7 +497,7 @@ const Cloud = (() => {
     const r = await fetch(`${ENDPOINT}?key=${hashed}`);
     if (r.status === 404) throw new Error('not_found');
     if (!r.ok) throw new Error('http_'+r.status);
-    const j = await r.json();
+    const j = await _decode(r);
     if (!j.data || !Array.isArray(j.data.members)) throw new Error('bad_payload');
     await DB.importAll(j.data);
     save({shopKey, password, hashedKey: hashed, lastSync: Date.now(), createdAt: Date.now()});
@@ -397,7 +515,7 @@ const Cloud = (() => {
   window.addEventListener('pagehide', flush);
   document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
 
-  return { isOn, getCfg: () => cfg, push, schedulePush, setup, restore, disconnect, genShopKey };
+  return { isOn, getCfg: () => cfg, push, pull, merge, schedulePush, setup, restore, disconnect, genShopKey };
 })();
 
 // 包裹 DB 的写操作，触发自动云同步
@@ -849,6 +967,12 @@ window.doUse = async function(memberId) {
 window.doDelete = async function(id) {
   if (!confirm('确认删除此会员及全部记录？此操作不可恢复。')) return;
   const [cards, txns] = await Promise.all([DB.byIdx('cards','mid',id), DB.byIdx('txns','mid',id)]);
+  const now = Date.now();
+  // 创建墓碑记录，用于双端同步时防止“复活”
+  await DB.put('deleted', {id, type:'member', deletedAt:now});
+  for (const c of cards) await DB.put('deleted', {id:c.id, type:'card', deletedAt:now});
+  for (const t of txns) await DB.put('deleted', {id:t.id, type:'txn', deletedAt:now});
+  // 实际删除
   await DB.del('members', id);
   await Promise.all([...cards.map(c=>DB.del('cards',c.id)), ...txns.map(t=>DB.del('txns',t.id))]);
   toast('已删除');
@@ -1024,7 +1148,8 @@ window.doImport = async function(e) {
 };
 
 // ── Init ───────────────────────────────────────────────────
-render();
+// 升级 DB schema（老用户增加 deleted store）
+DB.upgrade().then(() => render()).catch(() => render());
 
 // 同步指示器：失败状态点一下重试
 document.getElementById('cloud-indicator').addEventListener('click', e => {

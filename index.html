@@ -167,6 +167,7 @@ body{
 
 /* PULL TO REFRESH */
 .ptr{
+  position:absolute;top:0;left:0;right:0;z-index:10;
   text-align:center;height:0;overflow:visible;
   transition:height .3s cubic-bezier(.4,0,.2,1);
   pointer-events:none;
@@ -1057,6 +1058,7 @@ window.doUse = async function(memberId) {
 
   card.used += 1;
   const now = Date.now();
+  card.updatedAt = now;
   const note = result.note || '';
   await DB.put('cards', card);
   await DB.put('txns', {id:uid(), memberId, cardId:card.id, type:'use', sessions:1, note, createdAt:now});
@@ -1122,7 +1124,7 @@ window.saveNewMember = async function() {
   if (sessions>0) {
     const paid = parseFloat(document.getElementById('f-paid')?.value)||0;
     const note = (document.getElementById('f-note')?.value||'').trim();
-    const card = {id:uid(), memberId:member.id, total:sessions, used:0, paid, note, createdAt:now};
+    const card = {id:uid(), memberId:member.id, total:sessions, used:0, paid, note, createdAt:now, updatedAt:now};
     await DB.put('cards', card);
     await DB.put('txns', {id:uid(), memberId:member.id, cardId:card.id, type:'charge', sessions, paid, note, createdAt:now});
   }
@@ -1164,7 +1166,7 @@ window.saveCard = async function(memberId) {
   const paid = parseFloat(document.getElementById('c-paid')?.value)||0;
   const note = (document.getElementById('c-note')?.value||'').trim();
   const now = Date.now();
-  const card = {id:uid(), memberId, total:sessions, used:0, paid, note, createdAt:now};
+  const card = {id:uid(), memberId, total:sessions, used:0, paid, note, createdAt:now, updatedAt:now};
   await DB.put('cards', card);
   await DB.put('txns', {id:uid(), memberId, cardId:card.id, type:'charge', sessions, paid, note, createdAt:now});
   const member = await DB.get('members', memberId);

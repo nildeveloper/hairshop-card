@@ -165,6 +165,21 @@ body{
 }
 @keyframes tin{from{opacity:0;transform:translate(-50%,-6px)}to{opacity:1;transform:translate(-50%,0)}}
 
+/* PULL TO REFRESH */
+.ptr{
+  text-align:center;height:0;overflow:visible;
+  transition:height .3s cubic-bezier(.4,0,.2,1);
+  pointer-events:none;
+}
+.ptr-spinner{
+  font-size:22px;display:inline-block;
+  transition:transform .2s;
+}
+.ptr.active .ptr-spinner{
+  animation:ptrspin .6s linear infinite;
+}
+@keyframes ptrspin{to{transform:rotate(360deg)}}
+
 .mt8{margin-top:8px}
 .mt16{margin-top:16px}
 .tip{margin:0 16px 16px;padding:14px;background:rgba(0,122,255,.08);border-radius:12px;font-size:13px;color:var(--blue);line-height:1.6}
@@ -228,6 +243,7 @@ body{
 </head>
 <body>
 <div id="cloud-indicator"></div>
+<div id="ptr" class="ptr"><div class="ptr-spinner">↓</div></div>
 <div id="app"></div>
 <nav id="tabs">
   <button class="tab on" id="tab-home" onclick="goTab('home')">
@@ -351,6 +367,36 @@ const Cloud = (() => {
 
   const derive = (shopKey, password) => sha256(`${shopKey}:${password}:haircard-v1`);
 
+  // AES-GCM 加密密钥派生（与 hashedKey 独立，不影响现有服务端 key）
+  const deriveEncKey = async (shopKey, password) => {
+    const hex = await sha256(`${shopKey}:${password}:haircard-enc-v1`);
+    const raw = new Uint8Array(hex.match(/.{2}/g).map(b => parseInt(b, 16)));
+    return crypto.subtle.importKey('raw', raw, {name:'AES-GCM'}, false, ['encrypt','decrypt']);
+  };
+
+  // 加密：JSON → gzip → AES-GCM → [0x48, iv(12), ciphertext]
+  const enc = async (jsonStr, key) => {
+    const compressed = await gzip(jsonStr);
+    const plainBuf = await compressed.arrayBuffer();
+    const iv = crypto.getRandomValues(new Uint8Array(12));
+    const ct = await crypto.subtle.encrypt({name:'AES-GCM', iv}, key, plainBuf);
+    const out = new Uint8Array(1 + 12 + ct.byteLength);
+    out[0] = 0x48; // 'H' = haircard encrypted
+    out.set(iv, 1);
+    out.set(new Uint8Array(ct), 13);
+    return out.buffer;
+  };
+
+  // 解密：[0x48, iv(12), ciphertext] → AES-GCM → gunzip → JSON
+  const dec = async (buf, key) => {
+    const arr = new Uint8Array(buf);
+    if (arr[0] !== 0x48) throw new Error('not encrypted');
+    const iv = arr.slice(1, 13);
+    const ct = arr.slice(13);
+    const plain = await crypto.subtle.decrypt({name:'AES-GCM', iv}, key, ct);
+    return gunzip(new Blob([plain]));
+  };
+
   const isOn = () => !!(cfg && cfg.hashedKey);
 
   let okHideTimer = null;
@@ -380,24 +426,28 @@ const Cloud = (() => {
     return new Response(stream).text();
   };
 
-  // 解码远端响应（自动识别压缩/明文）
-  const _decode = async (resp) => {
-    const blob = await resp.blob();
-    const text = blob.type === 'application/octet-stream' ? await gunzip(blob) : await blob.text();
+  // 解码远端响应（仅支持加密格式）
+  const _decode = async (resp, shopKey, password) => {
+    const buf = await resp.arrayBuffer();
+    const text = await dec(buf, await deriveEncKey(shopKey, password));
     return JSON.parse(text);
   };
 
   // ── Pull: 拉取远端数据 ──────────────────────────────────
   const pull = async () => {
-    if (!isOn()) return null;
+    if (!isOn()) { console.log('[pull] cloud off'); return null; }
     try {
-      const r = await fetch(`${ENDPOINT}?key=${cfg.hashedKey}`);
-      if (r.status === 404) return null;
-      if (!r.ok) return null;
-      const j = await _decode(r);
+      const r = await fetch(`${ENDPOINT}?key=${cfg.hashedKey}`, {
+        headers: {'cache-control': 'no-cache'}
+      });
+      console.log('[pull] status:', r.status, 'type:', r.headers.get('content-type'));
+      if (r.status === 404) { console.log('[pull] 404 no data'); return null; }
+      if (!r.ok) { console.log('[pull] not ok'); return null; }
+      const j = await _decode(r, cfg.shopKey, cfg.password);
+      console.log('[pull] keys:', Object.keys(j), 'hasData:', !!j.data, 'members:', j.data?.members?.length);
       return j.data || null;
     } catch (e) {
-      console.warn('[cloud] pull failed', e);
+      console.warn('[pull] error:', e.message);
       return null;
     }
   };
@@ -438,11 +488,12 @@ const Cloud = (() => {
         for (const [id] of lm) {
           if (delIds.has(id)) await DB.del(store, id);
         }
+        return lm; // 返回合并后的 Map，用于墓碑过期判断
       };
 
-      await mergeStore('members', localMembers, remote.members, delMemberIds);
-      await mergeStore('cards', localCards, remote.cards, delCardIds);
-      await mergeStore('txns', localTxns, remote.txns, delTxnIds);
+      const mMembers = await mergeStore('members', localMembers, remote.members, delMemberIds);
+      const mCards = await mergeStore('cards', localCards, remote.cards, delCardIds);
+      const mTxns = await mergeStore('txns', localTxns, remote.txns, delTxnIds);
 
       // 保存合并后的墓碑（保留 type 字段）
       for (const [, t] of tombMap) {
@@ -451,14 +502,9 @@ const Cloud = (() => {
 
       // 清理过期墓碑：超过 30 天且对应记录确实不存在了
       const cutoff = Date.now() - 30 * 86400000;
-      const [curMembers, curCards, curTxns] = await Promise.all([
-        DB.getAll('members'), DB.getAll('cards'), DB.getAll('txns')
-      ]);
-      const allIds = new Set([
-        ...curMembers.map(m=>m.id), ...curCards.map(c=>c.id), ...curTxns.map(t=>t.id)
-      ]);
+      const allIds = new Set([...mMembers.keys(), ...mCards.keys(), ...mTxns.keys()]);
       const finalTombs = [...tombMap.values()].filter(t => {
-        if (t.deletedAt < cutoff && !allIds.has(t.id)) return false; // 已过期且记录不存在，丢弃
+        if (t.deletedAt < cutoff && !allIds.has(t.id)) return false;
         return true;
       });
       // 清空重建
@@ -472,46 +518,81 @@ const Cloud = (() => {
     }
   };
 
-  // ── Push: 先 pull 合并，再上传 ──────────────────────────
-  const push = async () => {
-    if (!isOn() || busy) return false;
+  const disconnect = () => save(null);
+
+  // ── 统一同步入口 ──────────────────────────────────────
+  // needPush=true: pull → merge → upload（本地有改动时）
+  // needPush=false: pull → merge → render（只拉取不上传）
+  const sync = async (needPush = false) => {
+    if (!isOn()) return false;
+    if (busy) {
+      // 如果当前 busy 且需要 push，等它完成后再追一次（最多等 8 秒）
+      if (needPush) {
+        await new Promise(r => {
+          let waited = 0;
+          const t = setInterval(() => {
+            waited += 300;
+            if (!busy || waited > 8000) { clearInterval(t); r(); }
+          }, 300);
+        });
+      } else {
+        return false; // 只读同步直接跳过
+      }
+    }
     busy = true;
-    setStatus('syncing', '同步中…');
+    if (needPush) setStatus('syncing', '同步中…');
     try {
-      // 1. 拉取远端数据并合并
+      // 1. 拉取远端
       const remote = await pull();
-      await merge(remote);
-      // 2. 导出合并后的数据并上传
-      const data = await DB.exportAll();
-      const jsonStr = JSON.stringify({data, modifiedAt: Date.now(), v: 1});
-      const compressed = await gzip(jsonStr);
-      const r = await fetch(`${ENDPOINT}?key=${cfg.hashedKey}`, {
-        method:'PUT',
-        headers:{'content-type':'application/octet-stream'},
-        body: compressed
-      });
-      if (!r.ok) throw new Error('http '+r.status);
-      cfg.lastSync = Date.now();
-      save(cfg);
-      setStatus('ok', '已同步');
+      // 2. 合并
+      const merged = await merge(remote);
+      // 3. 如果需要上传
+      if (needPush) {
+        const data = await DB.exportAll();
+        const jsonStr = JSON.stringify({data, modifiedAt: Date.now(), v: 1});
+        const encKey = await deriveEncKey(cfg.shopKey, cfg.password);
+        const encrypted = await enc(jsonStr, encKey);
+        const r = await fetch(`${ENDPOINT}?key=${cfg.hashedKey}`, {
+          method:'PUT',
+          headers:{'content-type':'application/octet-stream'},
+          body: encrypted
+        });
+        if (!r.ok) throw new Error('http '+r.status);
+        cfg.lastSync = Date.now();
+        save(cfg);
+      }
+      // 有实际数据变动时才显示状态
+      if (needPush || merged) setStatus('ok', '已同步');
+      else setStatus(null); // 无变动，静默
+      // 4. 刷新视图
+      if (typeof render === 'function') render();
       return true;
     } catch (e) {
-      console.warn('[cloud] push failed', e);
+      console.warn('[sync] failed', e);
       setStatus('fail', '同步失败 · 点此重试');
       return false;
-    } finally { busy = false; }
+    } finally {
+      busy = false;
+    }
   };
 
+  // 本地写操作后：延迟 3 秒触发完整同步（pull+merge+push）
   const schedulePush = () => {
     if (!isOn()) return;
     if (timer) clearTimeout(timer);
-    timer = setTimeout(() => push(), 3000);
+    timer = setTimeout(() => sync(true), 3000);
   };
+
+  // 页面可见时 / 下拉刷新：只拉取不上传
+  const autoSync = () => sync(false);
+
+  // 完整同步（pull+merge+push），手动同步按钮用
+  const push = () => sync(true);
 
   const setup = async (shopKey, password) => {
     const hashed = await derive(shopKey, password);
     save({shopKey, password, hashedKey: hashed, lastSync: 0, createdAt: Date.now()});
-    const ok = await push();
+    const ok = await sync(true);
     if (!ok) { save(null); throw new Error('上传失败，请检查网络'); }
     return true;
   };
@@ -521,20 +602,18 @@ const Cloud = (() => {
     const r = await fetch(`${ENDPOINT}?key=${hashed}`);
     if (r.status === 404) throw new Error('not_found');
     if (!r.ok) throw new Error('http_'+r.status);
-    const j = await _decode(r);
+    const j = await _decode(r, shopKey, password);
     if (!j.data || !Array.isArray(j.data.members)) throw new Error('bad_payload');
     await DB.importAll(j.data);
     save({shopKey, password, hashedKey: hashed, lastSync: Date.now(), createdAt: Date.now()});
     return true;
   };
 
-  const disconnect = () => save(null);
-
-  // 应用切后台/关闭前，把 pending 的更改立刻冲刷上去
+  // 切后台/关闭前：立刻冲刷未完成的 push
   const flush = () => {
     if (!isOn() || !timer) return;
     clearTimeout(timer); timer = null;
-    push();
+    sync(true); // flush 不等结果，尽力而为；若 busy 会排队等
   };
   window.addEventListener('pagehide', flush);
   document.addEventListener('visibilitychange', () => {
@@ -542,20 +621,7 @@ const Cloud = (() => {
     else autoSync();
   });
 
-  // 页面可见时自动拉取远端并合并
-  const autoSync = async () => {
-    if (!isOn() || busy) return;
-    try {
-      const remote = await pull();
-      await merge(remote);
-      // 合并后刷新当前视图
-      if (typeof render === 'function') render();
-    } catch (e) {
-      console.warn('[cloud] autoSync failed', e);
-    }
-  };
-
-  return { isOn, getCfg: () => cfg, push, pull, merge, schedulePush, autoSync, setup, restore, disconnect, genShopKey };
+  return { isOn, getCfg: () => cfg, sync, push, schedulePush, autoSync, setup, restore, disconnect, genShopKey };
 })();
 
 // 包裹 DB 的写操作，触发自动云同步（merge 期间静默，避免多余 push）
@@ -1188,13 +1254,56 @@ window.doImport = async function(e) {
 };
 
 // ── Init ───────────────────────────────────────────────────
-// 升级 DB schema（老用户增加 deleted store），然后渲染 + 拉取云端
 DB.upgrade().then(() => { render(); Cloud.autoSync(); }).catch(() => { render(); Cloud.autoSync(); });
 
 // 同步指示器：失败状态点一下重试
 document.getElementById('cloud-indicator').addEventListener('click', e => {
   if (e.currentTarget.classList.contains('fail')) Cloud.push();
 });
+
+// ── 下拉刷新 ─────────────────────────────────────────
+(() => {
+  const THRESHOLD = 70;
+  let sy = 0, pulling = false, refreshing = false;
+  const ptrEl = document.getElementById('ptr');
+  const spinner = ptrEl.querySelector('.ptr-spinner');
+
+  document.addEventListener('touchstart', e => {
+    if (refreshing) return;
+    const pg = e.target.closest('.page');
+    if (!pg || pg.scrollTop > 5) return;
+    sy = e.touches[0].clientY;
+    pulling = true;
+  }, {passive:true});
+
+  document.addEventListener('touchmove', e => {
+    if (!pulling || refreshing) return;
+    const dy = e.touches[0].clientY - sy;
+    if (dy < 0) { ptrEl.style.height = '0px'; pulling = false; return; }
+    const h = Math.min(dy * 0.45, 110);
+    ptrEl.style.height = h + 'px';
+    spinner.style.transform = 'rotate(' + Math.min(dy*2.5,360) + 'deg)';
+    spinner.style.opacity = Math.min(dy / THRESHOLD, 1);
+  }, {passive:true});
+
+  document.addEventListener('touchend', async () => {
+    if (!pulling) return;
+    pulling = false;
+    const h = parseInt(ptrEl.style.height) || 0;
+    if (h < THRESHOLD * 0.45) { ptrEl.style.height = '0px'; return; }
+    // 触发刷新
+    refreshing = true;
+    ptrEl.style.height = '46px';
+    ptrEl.classList.add('active');
+    spinner.style.opacity = '1';
+    try {
+      await Cloud.autoSync();
+    } catch(e) { console.warn('[ptr]', e); }
+    ptrEl.classList.remove('active');
+    ptrEl.style.height = '0px';
+    refreshing = false;
+  });
+})();
 
 // ── Service Worker 注册 ────────────────────────────────────
 if ('serviceWorker' in navigator) {

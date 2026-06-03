@@ -169,6 +169,25 @@ body{
 .mt16{margin-top:16px}
 .tip{margin:0 16px 16px;padding:14px;background:rgba(0,122,255,.08);border-radius:12px;font-size:13px;color:var(--blue);line-height:1.6}
 
+/* CLOUD STATUS INDICATOR */
+#cloud-indicator{
+  position:fixed;right:12px;bottom:calc(72px + var(--sb));z-index:100;
+  display:none;align-items:center;gap:6px;
+  font-size:12px;color:#fff;
+  background:rgba(0,0,0,.78);padding:5px 11px;border-radius:14px;
+  backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  pointer-events:none;
+  animation:cloudin .18s ease;
+}
+#cloud-indicator.show{display:flex}
+@keyframes cloudin{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:translateY(0)}}
+#cloud-indicator .cloud-dot{width:6px;height:6px;border-radius:50%;background:#fff;flex-shrink:0}
+#cloud-indicator.syncing .cloud-dot{animation:cloudpulse .9s ease-in-out infinite}
+@keyframes cloudpulse{0%,100%{opacity:.35;transform:scale(.85)}50%{opacity:1;transform:scale(1.1)}}
+#cloud-indicator.ok{background:rgba(52,199,89,.94)}
+#cloud-indicator.fail{background:rgba(255,59,48,.94);pointer-events:auto;cursor:pointer}
+#cloud-indicator.fail:active{opacity:.75}
+
 /* MODAL */
 .modal-mask{
   position:fixed;inset:0;z-index:200;background:rgba(0,0,0,.4);
@@ -208,6 +227,7 @@ body{
 </style>
 </head>
 <body>
+<div id="cloud-indicator"></div>
 <div id="app"></div>
 <nav id="tabs">
   <button class="tab on" id="tab-home" onclick="goTab('home')">
@@ -279,6 +299,116 @@ const DB = (() => {
     }
   };
 })();
+
+// ── Cloud Sync (Cloudflare KV) ─────────────────────────────
+const Cloud = (() => {
+  const LS = 'haircard_cloud';
+  const ENDPOINT = '/api/data';
+  let cfg = null, timer = null, busy = false;
+
+  try { cfg = JSON.parse(localStorage.getItem(LS) || 'null'); } catch { cfg = null; }
+
+  const save = c => { cfg = c; c ? localStorage.setItem(LS, JSON.stringify(c)) : localStorage.removeItem(LS); };
+
+  const genShopKey = () => {
+    const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 去掉 0/O/1/I 等易混
+    return Array.from({length:8}, () => c[Math.floor(Math.random()*c.length)]).join('');
+  };
+
+  const sha256 = async s => {
+    const buf = new TextEncoder().encode(s);
+    const h = await crypto.subtle.digest('SHA-256', buf);
+    return Array.from(new Uint8Array(h)).map(b=>b.toString(16).padStart(2,'0')).join('');
+  };
+
+  const derive = (shopKey, password) => sha256(`${shopKey}:${password}:haircard-v1`);
+
+  const isOn = () => !!(cfg && cfg.hashedKey);
+
+  let okHideTimer = null;
+  const setStatus = (state, msg) => {
+    const el = document.getElementById('cloud-indicator');
+    if (!el) return;
+    if (okHideTimer) { clearTimeout(okHideTimer); okHideTimer = null; }
+    if (!state) { el.className = ''; el.textContent = ''; return; }
+    el.className = 'show ' + state;
+    el.innerHTML = `<span class="cloud-dot"></span><span>${msg}</span>`;
+    if (state === 'ok') {
+      okHideTimer = setTimeout(() => { el.className = ''; el.textContent = ''; }, 1500);
+    }
+  };
+
+  const push = async () => {
+    if (!isOn() || busy) return false;
+    busy = true;
+    setStatus('syncing', '同步中…');
+    try {
+      const data = await DB.exportAll();
+      const body = JSON.stringify({data, modifiedAt: Date.now(), v: 1});
+      const r = await fetch(`${ENDPOINT}?key=${cfg.hashedKey}`, {
+        method:'PUT', headers:{'content-type':'application/json'}, body
+      });
+      if (!r.ok) throw new Error('http '+r.status);
+      cfg.lastSync = Date.now();
+      save(cfg);
+      setStatus('ok', '已同步');
+      return true;
+    } catch (e) {
+      console.warn('[cloud] push failed', e);
+      setStatus('fail', '同步失败 · 点此重试');
+      return false;
+    } finally { busy = false; }
+  };
+
+  const schedulePush = () => {
+    if (!isOn()) return;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(() => push(), 3000);
+  };
+
+  const setup = async (shopKey, password) => {
+    const hashed = await derive(shopKey, password);
+    save({shopKey, password, hashedKey: hashed, lastSync: 0, createdAt: Date.now()});
+    const ok = await push();
+    if (!ok) { save(null); throw new Error('上传失败，请检查网络'); }
+    return true;
+  };
+
+  const restore = async (shopKey, password) => {
+    const hashed = await derive(shopKey, password);
+    const r = await fetch(`${ENDPOINT}?key=${hashed}`);
+    if (r.status === 404) throw new Error('not_found');
+    if (!r.ok) throw new Error('http_'+r.status);
+    const j = await r.json();
+    if (!j.data || !Array.isArray(j.data.members)) throw new Error('bad_payload');
+    await DB.importAll(j.data);
+    save({shopKey, password, hashedKey: hashed, lastSync: Date.now(), createdAt: Date.now()});
+    return true;
+  };
+
+  const disconnect = () => save(null);
+
+  // 应用切后台/关闭前，把 pending 的更改立刻冲刷上去
+  const flush = () => {
+    if (!isOn() || !timer) return;
+    clearTimeout(timer); timer = null;
+    push();
+  };
+  window.addEventListener('pagehide', flush);
+  document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'hidden') flush(); });
+
+  return { isOn, getCfg: () => cfg, push, schedulePush, setup, restore, disconnect, genShopKey };
+})();
+
+// 包裹 DB 的写操作，触发自动云同步
+['put','del'].forEach(m => {
+  const orig = DB[m].bind(DB);
+  DB[m] = async function(...args) {
+    const r = await orig(...args);
+    Cloud.schedulePush();
+    return r;
+  };
+});
 
 // ── Utils ──────────────────────────────────────────────────
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
@@ -533,6 +663,160 @@ function promptNote({title, sub, placeholder, quick}) {
   });
 }
 
+// 通用对话框：支持自定义 html、按钮文案、validate（返回 false 阻止关闭、返回值作为 resolve）
+function showDialog({title, sub, html, confirmText='确认', cancelText='取消', validate}) {
+  return new Promise(resolve => {
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask';
+    mask.innerHTML = `
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-body">
+          <div class="modal-title">${title}</div>
+          ${sub?`<div class="modal-sub">${sub}</div>`:''}
+          ${html||''}
+        </div>
+        <div class="modal-acts">
+          <button class="modal-act" data-act="cancel">${cancelText}</button>
+          <button class="modal-act primary" data-act="ok">${confirmText}</button>
+        </div>
+      </div>`;
+    const close = v => { mask.remove(); resolve(v); };
+    mask.addEventListener('click', e => { if (e.target===mask) close(null); });
+    mask.querySelector('[data-act="cancel"]').onclick = () => close(null);
+    mask.querySelector('[data-act="ok"]').onclick = async () => {
+      const v = validate ? validate(mask) : true;
+      if (v === false || v == null) return;
+      close(v);
+    };
+    document.body.appendChild(mask);
+    setTimeout(() => mask.querySelector('input,textarea')?.focus(), 80);
+  });
+}
+
+window.cloudSetup = async function() {
+  const r1 = await showDialog({
+    title: '开启云端备份',
+    sub: '所有数据自动同步到云端。换手机/重装时凭"店铺秘钥+密码"恢复，不需要注册账号。',
+    html: `
+      <input class="modal-input" id="d-pwd" type="password" placeholder="请设置密码（至少 4 位）" autocomplete="new-password">
+      <input class="modal-input" id="d-pwd2" type="password" placeholder="再次输入密码" autocomplete="new-password" style="margin-top:8px">
+    `,
+    confirmText: '下一步',
+    validate(m) {
+      const p1 = m.querySelector('#d-pwd').value;
+      const p2 = m.querySelector('#d-pwd2').value;
+      if (p1.length < 4) { toast('密码至少 4 位'); return false; }
+      if (p1 !== p2) { toast('两次密码不一致'); return false; }
+      return {password: p1};
+    }
+  });
+  if (!r1) return;
+
+  const shopKey = Cloud.genShopKey();
+  const r2 = await showDialog({
+    title: '⚠️ 请抄好店铺秘钥',
+    sub: '秘钥+密码是恢复数据的唯一凭证，弄丢就找不回。请截图或抄到本子上。',
+    html: `
+      <div style="background:white;border-radius:8px;padding:14px;margin:8px 0">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:4px;text-align:left">店铺秘钥</div>
+        <div style="font-family:'SF Mono',Menlo,monospace;font-size:26px;font-weight:700;letter-spacing:3px;text-align:center;color:var(--blue)">${shopKey}</div>
+        <div style="font-size:12px;color:var(--text2);margin:12px 0 4px;text-align:left">密码</div>
+        <div style="font-family:'SF Mono',Menlo,monospace;font-size:18px;text-align:center;word-break:break-all">${r1.password}</div>
+      </div>
+      <input class="modal-input" id="d-confirm" placeholder="请再输入一遍秘钥确认你已记录" autocomplete="off" maxlength="8" style="text-transform:uppercase;font-family:monospace;letter-spacing:2px;text-align:center">
+    `,
+    confirmText: '确认开启',
+    validate(m) {
+      const v = m.querySelector('#d-confirm').value.trim().toUpperCase();
+      if (v !== shopKey) { toast('秘钥不一致'); return false; }
+      return true;
+    }
+  });
+  if (!r2) return;
+
+  toast('正在开启…');
+  try {
+    await Cloud.setup(shopKey, r1.password);
+    toast('☁️ 云端备份已开启');
+    vBackup();
+  } catch (e) {
+    toast('开启失败：'+e.message);
+  }
+};
+
+window.cloudRestore = async function() {
+  const local = await DB.getAll('members');
+  if (local.length > 0) {
+    if (!confirm(`当前手机上已有 ${local.length} 位会员的数据。\n\n恢复将完全覆盖现有数据，无法撤销。\n\n确定继续？`)) return;
+  }
+
+  const r = await showDialog({
+    title: '用秘钥恢复',
+    sub: '输入开通时记录的店铺秘钥和密码。',
+    html: `
+      <input class="modal-input" id="d-key" placeholder="店铺秘钥（8 位字母数字）" autocomplete="off" maxlength="8" style="text-transform:uppercase;font-family:monospace;letter-spacing:2px;text-align:center">
+      <input class="modal-input" id="d-pwd" type="password" placeholder="密码" autocomplete="current-password" style="margin-top:8px">
+    `,
+    confirmText: '恢复数据',
+    validate(m) {
+      const k = m.querySelector('#d-key').value.trim().toUpperCase();
+      const p = m.querySelector('#d-pwd').value;
+      if (!/^[A-Z2-9]{6,32}$/.test(k)) { toast('秘钥格式有误'); return false; }
+      if (!p) { toast('请输入密码'); return false; }
+      return {shopKey: k, password: p};
+    }
+  });
+  if (!r) return;
+
+  toast('正在拉取…');
+  try {
+    await Cloud.restore(r.shopKey, r.password);
+    toast('☁️ 已恢复');
+    vBackup();
+  } catch (e) {
+    if (e.message === 'not_found') toast('找不到数据，秘钥或密码错误？');
+    else toast('恢复失败：'+e.message);
+  }
+};
+
+window.cloudPushNow = async function() {
+  toast('正在同步…');
+  const ok = await Cloud.push();
+  toast(ok ? '☁️ 已同步' : '同步失败，请检查网络');
+  if (ok) vBackup();
+};
+
+window.cloudShowKey = async function() {
+  const cfg = Cloud.getCfg();
+  if (!cfg) return;
+  await showDialog({
+    title: '店铺秘钥',
+    sub: '请妥善保管，泄露会被人读取你的数据。',
+    html: `
+      <div style="background:white;border-radius:8px;padding:14px;margin:8px 0">
+        <div style="font-size:12px;color:var(--text2);margin-bottom:4px;text-align:left">店铺秘钥</div>
+        <div style="font-family:'SF Mono',Menlo,monospace;font-size:26px;font-weight:700;letter-spacing:3px;text-align:center;color:var(--blue)">${cfg.shopKey}</div>
+        <div style="font-size:12px;color:var(--text2);margin:12px 0 4px;text-align:left">密码</div>
+        <div style="font-family:'SF Mono',Menlo,monospace;font-size:18px;text-align:center;word-break:break-all">${cfg.password}</div>
+      </div>
+    `,
+    confirmText: '复制',
+    cancelText: '关闭',
+    validate() {
+      const text = `店铺秘钥: ${cfg.shopKey}\n密码: ${cfg.password}`;
+      navigator.clipboard?.writeText(text).then(()=>toast('已复制到剪贴板')).catch(()=>toast('复制失败，请手动抄写'));
+      return true;
+    }
+  });
+};
+
+window.cloudDisconnect = async function() {
+  if (!confirm('断开后本设备不再自动同步。\n本地数据、云端数据均保留。\n下次仍可用秘钥+密码恢复。\n\n确定断开？')) return;
+  Cloud.disconnect();
+  toast('已断开云端');
+  vBackup();
+};
+
 window.doUse = async function(memberId) {
   const cards = await DB.byIdx('cards','mid',memberId);
   const card = cards.filter(c=>c.total>c.used).sort((a,b)=>a.createdAt-b.createdAt)[0];
@@ -663,6 +947,8 @@ window.saveCard = async function(memberId) {
 // ── View: Backup ───────────────────────────────────────────
 async function vBackup() {
   const [members,cards,txns] = await Promise.all([DB.getAll('members'),DB.getAll('cards'),DB.getAll('txns')]);
+  const cloudOn = Cloud.isOn();
+  const cfg = Cloud.getCfg();
   document.getElementById('app').innerHTML = `
     <div class="nav"><div class="nav-title">备份与恢复</div></div>
     <div class="page">
@@ -674,10 +960,29 @@ async function vBackup() {
           <div class="row"><span class="row-lbl">收款总额</span><span class="row-val" style="color:var(--green);font-weight:700">¥${cards.reduce((s,c)=>s+(c.paid||0),0)}</span></div>
         </div>
 
-        <button class="btn btn-blue mt16" onclick="doExport()">📤 &nbsp; 导出备份文件（.json）</button>
+        <div class="sec-title" style="margin-top:24px">☁️ 云端备份${cloudOn?' · 已开启':''}</div>
+        ${cloudOn ? `
+          <div class="lcard">
+            <div class="row"><span class="row-lbl">店铺秘钥</span><span class="row-val" style="font-family:monospace;font-weight:700;letter-spacing:1px">${cfg.shopKey}</span></div>
+            <div class="row"><span class="row-lbl">上次同步</span><span class="row-val">${cfg.lastSync?fmtFull(cfg.lastSync):'未同步'}</span></div>
+          </div>
+          <button class="btn btn-blue mt8" onclick="cloudPushNow()">⬆️ &nbsp; 立即同步到云端</button>
+          <button class="btn btn-outline mt8" onclick="cloudShowKey()">查看 / 复制秘钥</button>
+          <button class="btn btn-gray mt8" onclick="cloudDisconnect()">断开云端</button>
+        ` : `
+          <div class="lcard">
+            <div style="padding:16px;font-size:14px;line-height:1.6;color:var(--text2)">
+              开启后所有数据自动同步到云端。换手机或重装时凭"店铺秘钥+密码"恢复，无需注册账号。完全免费。
+            </div>
+          </div>
+          <button class="btn btn-blue mt8" onclick="cloudSetup()">🚀 &nbsp; 开启云端备份</button>
+          <button class="btn btn-outline mt8" onclick="cloudRestore()">用秘钥恢复</button>
+        `}
 
-        <div class="sec-title" style="margin-top:24px">从文件恢复数据</div>
-        <div class="lcard">
+        <div class="sec-title" style="margin-top:24px">📁 本地文件备份</div>
+        <button class="btn btn-outline" onclick="doExport()">📤 &nbsp; 导出备份文件（.json）</button>
+
+        <div class="lcard mt8">
           <div style="padding:16px">
             <input type="file" id="imp" accept=".json" style="width:100%;font-size:15px" onchange="doImport(event)">
             <div style="font-size:13px;color:var(--text2);margin-top:10px;line-height:1.5">
@@ -687,7 +992,7 @@ async function vBackup() {
         </div>
 
         <div class="tip" style="margin-top:8px">
-          💡 建议：每周导出一次，把备份文件发到微信「文件传输助手」或存入「文件」App → iCloud Drive，防止手机出问题数据丢失。
+          💡 ${cloudOn?'已开启云端自动同步，本地导出可作为额外保险。':'建议优先开启云端备份；不愿用云端的话，请每周手动导出一次 .json 文件存到 iCloud Drive 或微信文件助手。'}
         </div>
       </div>
     </div>`;
@@ -713,12 +1018,18 @@ window.doImport = async function(e) {
   const cur = await DB.getAll('members');
   if (!confirm(`确认导入？将覆盖当前 ${cur.length} 个会员的全部数据，恢复为备份文件中的 ${data.members.length} 个会员。`)) return;
   await DB.importAll(data);
+  Cloud.schedulePush();
   toast(`已恢复 ${data.members.length} 个会员 ✓`);
   goTab('home');
 };
 
 // ── Init ───────────────────────────────────────────────────
 render();
+
+// 同步指示器：失败状态点一下重试
+document.getElementById('cloud-indicator').addEventListener('click', e => {
+  if (e.currentTarget.classList.contains('fail')) Cloud.push();
+});
 
 // ── Service Worker 注册 ────────────────────────────────────
 if ('serviceWorker' in navigator) {

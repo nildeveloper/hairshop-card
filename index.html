@@ -171,7 +171,6 @@ body{
   text-align:center;height:0;overflow:hidden;
   transition:height .3s cubic-bezier(.4,0,.2,1);
   pointer-events:none;
-  margin-top:0;
 }
 .ptr-spinner{
   font-size:22px;display:inline-block;
@@ -184,6 +183,28 @@ body{
 
 .mt8{margin-top:8px}
 .mt16{margin-top:16px}
+
+/* CARD TYPE */
+.type-row{display:flex;gap:8px;margin-bottom:16px}
+.type-btn{flex:1;padding:7px 0;background:var(--white);border:2px solid var(--sep);border-radius:8px;font-size:14px;font-weight:500;cursor:pointer;color:var(--text2);text-align:center;transition:all .15s}
+.type-btn.on{border-color:var(--blue);color:var(--blue);background:rgba(0,122,255,.06)}
+.type-btn:active{opacity:.7}
+.type-badge{display:inline-block;font-size:12px;padding:2px 8px;border-radius:6px;font-weight:500;margin-right:4px}
+.type-badge.t-洗{background:#e3f6f0;color:#0d9}
+.type-badge.t-剪{background:#eef0ff;color:#56f}
+.type-badge.t-染{background:#fff3e6;color:#f90}
+.type-badge.t-烫{background:#ffe8ee;color:#f36}
+.card-pick-item{
+  display:flex;align-items:center;justify-content:space-between;
+  padding:12px 14px;margin:6px 0;background:var(--bg);border-radius:10px;
+  cursor:pointer;border:2px solid transparent;transition:border .15s;
+}
+.card-pick-item:active,.card-pick-item.sel{border-color:var(--blue);background:rgba(0,122,255,.04)}
+.card-pick-item .cpi-left{display:flex;align-items:center;gap:6px}
+.card-pick-item .cpi-remain{font-size:20px;font-weight:600;color:var(--blue)}
+.card-pick-item .cpi-info{text-align:left}
+.card-pick-item .cpi-title{font-size:14px;font-weight:500}
+.card-pick-item .cpi-sub{font-size:12px;color:var(--text2)}
 .tip{margin:0 16px 16px;padding:14px;background:rgba(0,122,255,.08);border-radius:12px;font-size:13px;color:var(--blue);line-height:1.6}
 
 /* CLOUD STATUS INDICATOR */
@@ -496,6 +517,22 @@ const Cloud = (() => {
       const mCards = await mergeStore('cards', localCards, remote.cards, delCardIds);
       const mTxns = await mergeStore('txns', localTxns, remote.txns, delTxnIds);
 
+      // 合并后根据 txn 反算 card.used（txn 是 source of truth，防止并发扣减丢次数）
+      const allTxns = [...mTxns.values(), ...(remote.txns || []).filter(t => !mTxns.has(t.id) && !delTxnIds.has(t.id))];
+      const usedByCard = new Map();
+      for (const t of allTxns) {
+        if (t.cardId) usedByCard.set(t.cardId, (usedByCard.get(t.cardId) || 0) + (t.sessions || 1));
+      }
+      for (const card of mCards.values()) {
+        if (delCardIds.has(card.id)) continue;
+        const correct = usedByCard.get(card.id) || 0;
+        if (card.used !== correct) {
+          card.used = correct;
+          card.updatedAt = Date.now();
+          await DB.put('cards', card);
+        }
+      }
+
       // 保存合并后的墓碑（保留 type 字段）
       for (const [, t] of tombMap) {
         await DB.put('deleted', t);
@@ -637,6 +674,16 @@ const Cloud = (() => {
 
 // ── Utils ──────────────────────────────────────────────────
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
+const CARD_TYPES = ['洗','剪','染','烫'];
+const typeBadge = (t) => t ? `<span class="type-badge t-${t}">${t}</span>` : '';
+window.pickType = function(el) {
+  el.parentNode.querySelectorAll('.type-btn').forEach(b => b.classList.remove('on'));
+  el.classList.add('on');
+};
+window.getType = function(prefix) {
+  const on = document.querySelector(`#${prefix}-types .type-btn.on`);
+  return on ? on.dataset.type : '';
+};
 
 function fmtFull(ts) {
   const d = new Date(ts);
@@ -814,7 +861,7 @@ async function vMember() {
               const r=c.total-c.used;
               return `<div class="cr">
                 <div class="cr-left">
-                  <div class="cr-name">${c.total}次卡${c.paid?'（¥'+c.paid+'）':''}</div>
+                  <div class="cr-name">${typeBadge(c.type)}${c.total}次卡${c.paid?'（¥'+c.paid+'）':''}</div>
                   <div class="cr-sub">${fmtFull(c.createdAt)}${c.note?' · '+c.note:''}</div>
                 </div>
                 <div class="cr-right">
@@ -835,7 +882,7 @@ async function vMember() {
               <div class="ti">
                 <div class="tic ${t.type}">${t.type==='use'?'✂️':'💳'}</div>
                 <div class="tt">
-                  <div class="ttitle">${t.type==='use'?'划卡消费':('充值 '+t.sessions+' 次'+(t.paid?'（¥'+t.paid+'）':''))}</div>
+                  <div class="ttitle">${t.type==='use'?'划卡消费':('充值 '+t.sessions+' 次'+(t.paid?'（¥'+t.paid+'）':''))}${t.cardType?' · '+typeBadge(t.cardType):''}</div>
                   <div class="ttime">${fmtFull(t.createdAt)}${t.note?' · '+t.note:''}</div>
                 </div>
                 <div class="tamt ${t.type}">${t.type==='use'?'-1 次':'+'+t.sessions+' 次'}</div>
@@ -1042,16 +1089,72 @@ window.cloudDisconnect = async function() {
   vBackup();
 };
 
+// 选卡弹窗（多卡时按类型选择扣哪张卡）
+function pickCard(cards, memberName) {
+  return new Promise(resolve => {
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask';
+    const items = cards.map((c,i) => {
+      const r = c.total - c.used;
+      const typeLabel = c.type ? typeBadge(c.type) : '';
+      return `<div class="card-pick-item${i===0?' sel':''}" data-idx="${i}">
+        <div class="cpi-left">
+          <div class="cpi-info">
+            <div class="cpi-title">${typeLabel}${c.total}次卡</div>
+            <div class="cpi-sub">${fmtFull(c.createdAt)}</div>
+          </div>
+        </div>
+        <div class="cpi-remain">${r}</div>
+      </div>`;
+    }).join('');
+    mask.innerHTML = `
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-body">
+          <div class="modal-title">选择扣减的卡</div>
+          <div class="modal-sub">${memberName} · 剩余 ${cards.length} 张卡可用</div>
+          ${items}
+        </div>
+        <div class="modal-acts">
+          <button class="modal-act" data-act="cancel">取消</button>
+          <button class="modal-act primary" data-act="ok">确认</button>
+        </div>
+      </div>`;
+    let selIdx = 0;
+    const close = v => { mask.remove(); resolve(v); };
+    mask.addEventListener('click', e => { if (e.target===mask) close(null); });
+    mask.querySelectorAll('.card-pick-item').forEach(el => {
+      el.onclick = () => {
+        mask.querySelectorAll('.card-pick-item').forEach(e => e.classList.remove('sel'));
+        el.classList.add('sel');
+        selIdx = parseInt(el.dataset.idx);
+      };
+    });
+    mask.querySelector('[data-act="cancel"]').onclick = () => close(null);
+    mask.querySelector('[data-act="ok"]').onclick = () => close(cards[selIdx]);
+    document.body.appendChild(mask);
+  });
+}
+
 window.doUse = async function(memberId) {
   const cards = await DB.byIdx('cards','mid',memberId);
-  const card = cards.filter(c=>c.total>c.used).sort((a,b)=>a.createdAt-b.createdAt)[0];
-  if (!card) { toast('没有剩余次数'); return; }
+  const activeCards = cards.filter(c=>c.total>c.used).sort((a,b)=>a.createdAt-b.createdAt);
+  if (!activeCards.length) { toast('没有剩余次数'); return; }
 
   const member = await DB.get('members', memberId);
+
+  // 多张卡时让用户选，单张卡自动选
+  let card;
+  if (activeCards.length === 1) {
+    card = activeCards[0];
+  } else {
+    card = await pickCard(activeCards, member.name);
+    if (!card) return;
+  }
+
   const result = await promptNote({
     title: '划卡消费',
-    sub: `${member.name} · 本次扣 1 次`,
-    placeholder: '选填备注，如：剪发 / 烫染',
+    sub: `${member.name} · ${card.type?card.type+'·':''}剩余 ${card.total-card.used} 次`,
+    placeholder: '选填备注',
     quick: ['剪发','洗剪吹','烫发','染发','造型']
   });
   if (result === null) return;
@@ -1061,7 +1164,7 @@ window.doUse = async function(memberId) {
   card.updatedAt = now;
   const note = result.note || '';
   await DB.put('cards', card);
-  await DB.put('txns', {id:uid(), memberId, cardId:card.id, type:'use', sessions:1, note, createdAt:now});
+  await DB.put('txns', {id:uid(), memberId, cardId:card.id, cardType:card.type||'', type:'use', sessions:1, note, createdAt:now});
 
   member.updatedAt = now;
   await DB.put('members', member);
@@ -1104,6 +1207,7 @@ function vAddMember() {
 
         <div class="sec-title mt8">顺带开次卡（可跳过）</div>
         <div class="fcard">
+          <div class="fr"><label class="fl">类型</label><div class="type-row" id="f-types" style="flex:1;margin:0">${CARD_TYPES.map(t=>`<button class="type-btn" data-type="${t}" onclick="pickType(this)">${t}</button>`).join('')}</div></div>
           <div class="fr"><label class="fl">次数</label><input class="fi" id="f-sessions" placeholder="如：10" type="number" min="1"></div>
           <div class="fr"><label class="fl">实收 ¥</label><input class="fi" id="f-paid" placeholder="如：200" type="number" min="0"></div>
           <div class="fr"><label class="fl">备注</label><input class="fi" id="f-note" placeholder="选填" type="text"></div>
@@ -1124,9 +1228,10 @@ window.saveNewMember = async function() {
   if (sessions>0) {
     const paid = parseFloat(document.getElementById('f-paid')?.value)||0;
     const note = (document.getElementById('f-note')?.value||'').trim();
-    const card = {id:uid(), memberId:member.id, total:sessions, used:0, paid, note, createdAt:now, updatedAt:now};
+    const cardType = getType('f');
+    const card = {id:uid(), memberId:member.id, type:cardType, total:sessions, used:0, paid, note, createdAt:now, updatedAt:now};
     await DB.put('cards', card);
-    await DB.put('txns', {id:uid(), memberId:member.id, cardId:card.id, type:'charge', sessions, paid, note, createdAt:now});
+    await DB.put('txns', {id:uid(), memberId:member.id, cardId:card.id, cardType, type:'charge', sessions, paid, note, createdAt:now});
   }
   toast('已添加');
   stack = [];
@@ -1145,6 +1250,8 @@ async function vAddCard() {
     </div>
     <div class="page notabs">
       <div class="sec" style="padding-top:20px">
+        <div class="sec-title">卡类型</div>
+        <div class="type-row" id="c-types">${CARD_TYPES.map(t=>`<button class="type-btn" data-type="${t}" onclick="pickType(this)">${t}</button>`).join('')}</div>
         <div class="sec-title">快速选次数</div>
         <div class="qgrid">
           ${[5,10,15,20,30,50].map(n=>`<button class="qbtn" onclick="setN(${n})">${n}次</button>`).join('')}
@@ -1161,17 +1268,18 @@ async function vAddCard() {
 window.setN = n => { const i=document.getElementById('c-sessions'); if(i) i.value=n; };
 
 window.saveCard = async function(memberId) {
+  const cardType = getType('c');
   const sessions = parseInt(document.getElementById('c-sessions')?.value)||0;
   if (sessions<=0) { toast('请输入次数'); return; }
   const paid = parseFloat(document.getElementById('c-paid')?.value)||0;
   const note = (document.getElementById('c-note')?.value||'').trim();
   const now = Date.now();
-  const card = {id:uid(), memberId, total:sessions, used:0, paid, note, createdAt:now, updatedAt:now};
+  const card = {id:uid(), memberId, type:cardType, total:sessions, used:0, paid, note, createdAt:now, updatedAt:now};
   await DB.put('cards', card);
-  await DB.put('txns', {id:uid(), memberId, cardId:card.id, type:'charge', sessions, paid, note, createdAt:now});
+  await DB.put('txns', {id:uid(), memberId, cardId:card.id, cardType, type:'charge', sessions, paid, note, createdAt:now});
   const member = await DB.get('members', memberId);
   if (member) { member.updatedAt=now; await DB.put('members',member); }
-  toast(`已开 ${sessions} 次卡！`);
+  toast(`已开 ${cardType?cardType+'·':''}${sessions} 次卡！`);
   stack = [];
   navigate('member', {id:memberId}, false);
 };
@@ -1293,8 +1401,11 @@ document.getElementById('cloud-indicator').addEventListener('click', e => {
 
   document.addEventListener('touchmove', e => {
     if (!pulling || refreshing) return;
+    // 页面已重建（ptrEl 脱离 DOM），取消下拉
+    if (!ptrEl || !ptrEl.isConnected) { pulling = false; ptrEl = null; return; }
     const dy = e.touches[0].clientY - sy;
-    if (dy < 0) { ptrEl.style.height = '0px'; pulling = false; return; }
+    if (dy < 0) { ptrEl.style.transition = ''; ptrEl.style.height = '0px'; pulling = false; return; }
+    ptrEl.style.transition = 'none'; // 拖动时禁用过渡，避免卡顿
     const h = Math.min(dy * 0.45, 110);
     ptrEl.style.height = h + 'px';
     spinner.style.transform = 'rotate(' + Math.min(dy*2.5,360) + 'deg)';
@@ -1304,10 +1415,13 @@ document.getElementById('cloud-indicator').addEventListener('click', e => {
   document.addEventListener('touchend', async () => {
     if (!pulling) return;
     pulling = false;
+    // 页面已重建，跳过同步
+    if (!ptrEl || !ptrEl.isConnected) { ptrEl = null; return; }
     const h = parseInt(ptrEl.style.height) || 0;
-    if (h < THRESHOLD * 0.45) { ptrEl.style.height = '0px'; return; }
+    if (h < THRESHOLD * 0.45) { ptrEl.style.transition = ''; ptrEl.style.height = '0px'; return; }
     // 触发刷新
     refreshing = true;
+    ptrEl.style.transition = ''; // 恢复过渡动画
     ptrEl.style.height = '46px';
     ptrEl.classList.add('active');
     spinner.style.opacity = '1';

@@ -521,7 +521,7 @@ const Cloud = (() => {
       const allTxns = [...mTxns.values(), ...(remote.txns || []).filter(t => !mTxns.has(t.id) && !delTxnIds.has(t.id))];
       const usedByCard = new Map();
       for (const t of allTxns) {
-        if (t.cardId) usedByCard.set(t.cardId, (usedByCard.get(t.cardId) || 0) + (t.sessions || 1));
+        if (t.cardId && t.type === 'use') usedByCard.set(t.cardId, (usedByCard.get(t.cardId) || 0) + (t.sessions || 1));
       }
       for (const card of mCards.values()) {
         if (delCardIds.has(card.id)) continue;

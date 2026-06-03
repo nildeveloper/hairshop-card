@@ -167,10 +167,11 @@ body{
 
 /* PULL TO REFRESH */
 .ptr{
-  position:absolute;top:0;left:0;right:0;z-index:10;
-  text-align:center;height:0;overflow:visible;
+  position:sticky;top:0;z-index:10;
+  text-align:center;height:0;overflow:hidden;
   transition:height .3s cubic-bezier(.4,0,.2,1);
   pointer-events:none;
+  margin-top:0;
 }
 .ptr-spinner{
   font-size:22px;display:inline-block;
@@ -244,7 +245,6 @@ body{
 </head>
 <body>
 <div id="cloud-indicator"></div>
-<div id="ptr" class="ptr"><div class="ptr-spinner">↓</div></div>
 <div id="app"></div>
 <nav id="tabs">
   <button class="tab on" id="tab-home" onclick="goTab('home')">
@@ -1267,13 +1267,26 @@ document.getElementById('cloud-indicator').addEventListener('click', e => {
 (() => {
   const THRESHOLD = 70;
   let sy = 0, pulling = false, refreshing = false;
-  const ptrEl = document.getElementById('ptr');
-  const spinner = ptrEl.querySelector('.ptr-spinner');
+  let ptrEl = null, spinner = null, page = null;
+
+  const ensurePtr = (pg) => {
+    // 把 ptr 放到当前 .page 里（sticky 定位，跟随滚动内容）
+    if (ptrEl && ptrEl.parentNode === pg) return;
+    if (ptrEl) ptrEl.remove();
+    ptrEl = document.createElement('div');
+    ptrEl.id = 'ptr';
+    ptrEl.className = 'ptr';
+    ptrEl.innerHTML = '<div class="ptr-spinner">↓</div>';
+    pg.prepend(ptrEl);
+    spinner = ptrEl.querySelector('.ptr-spinner');
+    page = pg;
+  };
 
   document.addEventListener('touchstart', e => {
     if (refreshing) return;
     const pg = e.target.closest('.page');
     if (!pg || pg.scrollTop > 5) return;
+    ensurePtr(pg);
     sy = e.touches[0].clientY;
     pulling = true;
   }, {passive:true});

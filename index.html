@@ -112,6 +112,17 @@ body{
 .btn-red{background:var(--red);color:white}
 .btn-outline{background:var(--white);color:var(--blue);border:1.5px solid var(--blue)}
 .btn-gray{background:rgba(142,142,147,.15);color:var(--text)}
+/* Dashboard action group */
+.dash-actions{display:flex;gap:8px;margin-bottom:12px;flex-wrap:nowrap;background:none;padding:0;border-radius:0;box-shadow:none}
+.dash-actions .btn{flex:1 1 0;min-width:0;display:inline-flex;align-items:center;justify-content:center;padding:8px 6px;gap:8px;width:auto;height:44px;line-height:1;border-radius:10px}
+.dash-actions .btn-ic{font-size:18px;line-height:1;display:inline-flex;align-items:center;justify-content:center}
+.dash-actions .btn-label{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:inline-block;vertical-align:middle;font-size:15px}
+
+@media (max-width:380px){
+  .dash-actions .btn{padding:8px 6px}
+  .dash-actions .btn-ic{font-size:16px}
+  .dash-actions .btn-label{font-size:14px}
+}
 
 /* FORM */
 .fcard{background:var(--white);border-radius:12px;overflow:hidden;margin-bottom:16px}
@@ -207,6 +218,28 @@ body{
 .card-pick-item .cpi-sub{font-size:12px;color:var(--text2)}
 .tip{margin:0 16px 16px;padding:14px;background:rgba(0,122,255,.08);border-radius:12px;font-size:13px;color:var(--blue);line-height:1.6}
 
+/* STATS */
+.st-period{display:flex;align-items:center;justify-content:center;gap:16px;padding:14px 16px;background:var(--white);margin:0 0 16px;border-radius:12px}
+.st-period .st-arrow{background:none;border:none;font-size:22px;color:var(--blue);cursor:pointer;padding:4px 8px}
+.st-period .st-arrow:active{opacity:.5}
+.st-period .st-label{font-size:17px;font-weight:600;min-width:120px;text-align:center}
+.st-mode{display:flex;margin:0 0 16px;background:var(--bg);border-radius:8px;padding:2px}
+.st-mode button{flex:1;padding:7px 0;border:none;background:none;font-size:14px;font-weight:500;color:var(--text2);cursor:pointer;border-radius:6px;transition:all .15s}
+.st-mode button.on{background:var(--white);color:var(--text);box-shadow:0 1px 3px rgba(0,0,0,.08)}
+.st-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:0 0 16px;padding:0;width:100%}
+.st-card{background:var(--white);border-radius:12px;padding:14px 16px}
+.st-card .st-val{font-size:26px;font-weight:700;line-height:1.2}
+.st-card .st-val.green{color:var(--green)}
+.st-card .st-val.blue{color:var(--blue)}
+.st-card .st-val.orange{color:var(--orange)}
+.st-card .st-lbl{font-size:12px;color:var(--text2);margin-top:4px}
+.st-break{background:var(--white);border-radius:12px;margin:0 0 16px;overflow:hidden;width:100%}
+.st-break-title{font-size:13px;color:var(--text2);padding:12px 16px 6px;font-weight:500}
+.st-break-row{display:flex;align-items:center;justify-content:space-between;padding:10px 16px;border-bottom:.5px solid var(--bg)}
+.st-break-row:last-child{border-bottom:none}
+.st-break-row .st-b-name{display:flex;align-items:center;gap:6px;font-size:15px}
+.st-break-row .st-b-val{font-size:15px;font-weight:600}
+
 /* CLOUD STATUS INDICATOR */
 #cloud-indicator{
   position:fixed;right:12px;bottom:calc(72px + var(--sb));z-index:100;
@@ -269,10 +302,13 @@ body{
 <div id="app"></div>
 <nav id="tabs">
   <button class="tab on" id="tab-home" onclick="goTab('home')">
-    <span class="tab-ic">🔍</span><span class="tab-lb">查找</span>
+    <span class="tab-ic">🏠</span><span class="tab-lb">仪表盘</span>
   </button>
   <button class="tab" id="tab-members" onclick="goTab('members')">
     <span class="tab-ic">👥</span><span class="tab-lb">会员</span>
+  </button>
+  <button class="tab" id="tab-stats" onclick="goTab('stats')">
+    <span class="tab-ic">📊</span><span class="tab-lb">统计</span>
   </button>
   <button class="tab" id="tab-backup" onclick="goTab('backup')">
     <span class="tab-ic">☁️</span><span class="tab-lb">备份</span>
@@ -523,7 +559,9 @@ const Cloud = (() => {
       for (const t of allTxns) {
         if (t.cardId && t.type === 'use') usedByCard.set(t.cardId, (usedByCard.get(t.cardId) || 0) + (t.sessions || 1));
       }
-      for (const card of mCards.values()) {
+      // 读 DB 中所有卡（包含远端新增的），而不只是本地 Map
+      const dbCards = await DB.getAll('cards');
+      for (const card of dbCards) {
         if (delCardIds.has(card.id)) continue;
         const correct = usedByCard.get(card.id) || 0;
         if (card.used !== correct) {
@@ -685,6 +723,20 @@ window.getType = function(prefix) {
   return on ? on.dataset.type : '';
 };
 
+// New: members view mode (recent/name)
+let MEMBERS_VIEW_MODE = 'recent';
+window.setMembersMode = function(m) {
+  if (m !== 'recent' && m !== 'name') return;
+  MEMBERS_VIEW_MODE = m;
+  // update button UI if present
+  const brec = document.getElementById('m-mode-recent');
+  const bname = document.getElementById('m-mode-name');
+  if (brec) brec.classList.toggle('on', MEMBERS_VIEW_MODE === 'recent');
+  if (bname) bname.classList.toggle('on', MEMBERS_VIEW_MODE === 'name');
+  // If members page is active, refresh list
+  if (curView === 'members') loadList('', MEMBERS_VIEW_MODE);
+};
+
 function fmtFull(ts) {
   const d = new Date(ts);
   return `${d.getFullYear()}/${d.getMonth()+1}/${d.getDate()} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
@@ -711,7 +763,7 @@ function toast(msg) {
 
 // ── Router ─────────────────────────────────────────────────
 let curView = 'home', curParams = {}, stack = [];
-const MAIN_VIEWS = ['home','members','backup'];
+const MAIN_VIEWS = ['home','members','stats','backup'];
 
 function goTab(view) { stack=[]; navigate(view,{},false); }
 function goBack() { const p=stack.pop(); if(p) navigate(p.view,p.params,false); else goTab('home'); }
@@ -730,46 +782,145 @@ function render() {
     const el = document.getElementById('tab-'+v);
     if (el) el.className = 'tab' + (curView===v?' on':'');
   });
-  const views = {home:vHome, members:vMembers, member:vMember, addMember:vAddMember, addCard:vAddCard, backup:vBackup};
+  const views = {home:vHome, members:vMembers, stats:vStats, member:vMember, addMember:vAddMember, addCard:vAddCard, backup:vBackup};
   (views[curView]||vHome)();
 }
 
-// ── View: Home ─────────────────────────────────────────────
+// ── View: Home (Dashboard) ─────────────────────────────────
 async function vHome() {
+  // Dashboard shows KPIs for current month and recent activity + quick actions
+  const pb = periodBounds('month', Date.now());
+  const inRange = t => t >= pb.start && t < pb.end;
+  const [members, cards, txns] = await Promise.all([DB.getAll('members'), DB.getAll('cards'), DB.getAll('txns')]);
+
+  const newMembers = members.filter(m => m.createdAt && inRange(m.createdAt)).length;
+  const chargeTxns = txns.filter(t => t.type === 'charge' && t.createdAt && inRange(t.createdAt));
+  const chargeSessions = chargeTxns.reduce((s,t)=>s+(t.sessions||0),0);
+  const revenue = chargeTxns.reduce((s,t)=>s+((t.paid||0)),0);
+  const useTxns = txns.filter(t => t.type === 'use' && t.createdAt && inRange(t.createdAt));
+  const useCount = useTxns.reduce((s,t)=>s+(t.sessions||1),0);
+  const actSet = new Set();
+  txns.forEach(t => { if (t.createdAt && inRange(t.createdAt) && t.memberId) actSet.add(t.memberId); });
+  const activeMembers = actSet.size;
+
+  // low-balance members (remaining <=3), show up to 5
+  const remainMap = {};
+  cards.forEach(c => { remainMap[c.memberId] = (remainMap[c.memberId]||0) + (c.total - c.used); });
+  const lowList = members.map(m => ({id:m.id, name:m.name, remain: remainMap[m.id]||0})).filter(x=>x.remain>0 && x.remain<=3).sort((a,b)=>a.remain-b.remain).slice(0,5);
+
+  // recent txns
+  const recentTxns = txns.sort((a,b)=>b.createdAt-a.createdAt).slice(0,10);
+
+    document.getElementById('app').innerHTML = `
+    <div class="nav">
+      <span class="nav-btn" aria-hidden="true" style="visibility:hidden"> </span>
+      <div class="nav-title">仪表盘</div>
+      <span class="nav-btn" aria-hidden="true" style="visibility:hidden"> </span>
+    </div>
+    <div class="page">
+      <div style="padding:12px 16px">
+        <div class="dash-actions">
+          <button class="btn btn-outline" onclick="navigate('addMember')"><span class="btn-ic">➕</span><span class="btn-label">新建会员</span></button>
+          <button class="btn btn-outline" onclick="navigate('members')"><span class="btn-ic">💳</span><span class="btn-label">开次卡</span></button>
+          <button class="btn btn-outline" onclick="cloudPushNow()"><span class="btn-ic">⬆️</span><span class="btn-label">同步</span></button>
+        </div>
+
+        <div class="st-grid">
+          <div class="st-card"><div class="st-val blue">${newMembers}</div><div class="st-lbl">本月新增会员</div></div>
+          <div class="st-card"><div class="st-val">${activeMembers}</div><div class="st-lbl">本月活跃会员</div></div>
+          <div class="st-card"><div class="st-val">${chargeSessions}</div><div class="st-lbl">本月充值次数</div></div>
+          <div class="st-card"><div class="st-val green">${useCount}</div><div class="st-lbl">本月划卡消费（次）</div></div>
+        </div>
+
+        <div class="st-break" style="margin-top:12px">
+          <div class="st-break-title">本月汇总</div>
+          <div class="st-break-row"><div class="st-b-name">充值金额</div><div class="st-b-val">¥${revenue}</div></div>
+          <div class="st-break-row"><div class="st-b-name">净增加可用次数</div><div class="st-b-val">${chargeSessions - useCount} 次</div></div>
+        </div>
+
+        <div class="st-break" style="margin-top:12px">
+          <div class="st-break-title">低余额提醒（剩余 ≤ 3）</div>
+          ${lowList.length ? lowList.map(l=>`<div class="st-break-row" onclick="navigate('member',{id:'${l.id}'})"><div class="st-b-name">${l.name}</div><div class="st-b-val">剩 ${l.remain} 次</div></div>`).join('') : '<div class="st-break-row"><div class="st-b-name">暂无低余额提醒</div><div></div></div>'}
+        </div>
+
+        <div class="sec-title mt8">最近操作</div>
+        <div class="lcard mt8">
+          ${recentTxns.length ? recentTxns.map(t=>{
+            const m = members.find(x=>x.id===t.memberId) || {name:'未知'};
+            // build action html with optional small badge for card type
+            let actionText = '';
+            if (t.type === 'use') actionText = `划卡消费 · ${(t.sessions||1)} 次`;
+            else actionText = `充值 · ${(t.sessions||0)} 次`;
+            const badgeHtml = t.cardType ? (' ' + typeBadge(t.cardType)) : '';
+            const paidHtml = (t.type === 'charge' && t.paid) ? (' · ¥' + t.paid) : '';
+            const note = t.note ? ` · ${t.note}` : '';
+            const actionHtml = actionText + badgeHtml + paidHtml;
+            return `<div class="ti" onclick="navigate('member',{id:'${t.memberId}'})">
+              <div class="tic ${t.type}">${t.type==='use'?'✂️':'💳'}</div>
+              <div class="tt"><div class="ttitle">${m.name}</div><div class="ttime" style="font-size:13px;color:var(--text2)">${actionHtml}${note}</div><div class="ttime">${fmtFull(t.createdAt)}</div></div>
+              <div class="tamt ${t.type}">${t.type==='use' ? '-'+(t.sessions||1)+' 次' : '+'+(t.sessions||0)+' 次'}</div>
+            </div>`;
+          }).join('') : `<div class="empty"><div class="empty-ic">📭</div><div class="empty-t">暂无操作记录</div></div>`}
+        </div>
+
+      </div>
+    </div>`;
+}
+
+// ── View: Members ──────────────────────────────────────────
+async function vMembers() {
+  // render members page with search and mode toggle
+  const [members, cards] = await Promise.all([DB.getAll('members'), DB.getAll('cards')]);
+  const stats = {};
+  cards.forEach(c => { stats[c.memberId] = (stats[c.memberId]||0) + (c.total-c.used); });
+
   document.getElementById('app').innerHTML = `
     <div class="nav">
-      <span class="nav-btn" aria-hidden="true" style="visibility:hidden">+ 会员</span>
-      <div class="nav-title">💈 次卡管理</div>
-      <button class="nav-btn bold" style="text-align:right" onclick="navigate('addMember')">+ 会员</button>
+      <span class="nav-btn" aria-hidden="true" style="visibility:hidden">+ 添加</span>
+      <div class="nav-title">全部会员（${members.length}）</div>
+      <button class="nav-btn bold" style="text-align:right" onclick="navigate('addMember')">+ 添加</button>
     </div>
-    <div class="page" id="pg">
+    <div class="page">
       <div class="search-wrap">
         <div class="search-box">
           <span style="color:#8E8E93;font-size:15px">🔍</span>
           <input id="srch" type="text" placeholder="搜姓名或手机号…" autocomplete="off" oninput="doSearch(this.value)">
         </div>
       </div>
+
+      <div style="padding:8px 16px;display:flex;gap:8px">
+        <button id="m-mode-recent" class="type-btn ${MEMBERS_VIEW_MODE==='recent'?'on':''}" onclick="setMembersMode('recent')">最近</button>
+        <button id="m-mode-name" class="type-btn ${MEMBERS_VIEW_MODE==='name'?'on':''}" onclick="setMembersMode('name')">按姓名</button>
+      </div>
+
       <div id="mlist"></div>
     </div>`;
-  await loadList('');
-  const s = document.getElementById('srch'); if(s) s.focus();
+
+  // load list with current mode
+  await loadList('', MEMBERS_VIEW_MODE);
+  setTimeout(()=>{const s=document.getElementById('srch'); if(s) s.focus();}, 80);
 }
 
-window.doSearch = async q => loadList(q);
+window.doSearch = async q => loadList(q, MEMBERS_VIEW_MODE);
 
-async function loadList(q) {
+async function loadList(q, mode = 'recent') {
   const [members, cards] = await Promise.all([DB.getAll('members'), DB.getAll('cards')]);
   const stats = {};
   cards.forEach(c => { stats[c.memberId] = (stats[c.memberId]||0) + (c.total-c.used); });
-  const list = q
+  let list = q
     ? members.filter(m => m.name.includes(q) || (m.phone&&m.phone.includes(q)))
     : members;
-  list.sort((a,b) => (b.updatedAt||b.createdAt) - (a.updatedAt||a.createdAt));
+
+  if (mode === 'name') {
+    list.sort((a,b) => a.name.localeCompare(b.name,'zh'));
+  } else {
+    list.sort((a,b) => (b.updatedAt||b.createdAt) - (a.updatedAt||a.createdAt));
+  }
 
   const el = document.getElementById('mlist');
   if (!el) return;
   if (!list.length) {
-    el.innerHTML = `<div class="empty"><div class="empty-ic">💈</div><div class="empty-t">${q?'没找到':'还没有会员'}</div><div class="empty-s">${q?'换个关键词试试':'点右上角 + 号添加第一位会员'}</div></div>`;
+    el.innerHTML = `<div class="empty"><div class="empty-ic">👥</div><div class="empty-t">${q?'没找到':'还没有会员'}</div><div class="empty-s">${q?'换个关键词试试':'点右上角 + 号添加第一位会员'}</div></div>`;
     return;
   }
   el.innerHTML = `<div class="lcard mx">` + list.map(m => {
@@ -783,32 +934,141 @@ async function loadList(q) {
   }).join('') + '</div>';
 }
 
-// ── View: Members ──────────────────────────────────────────
-async function vMembers() {
-  const [members, cards] = await Promise.all([DB.getAll('members'), DB.getAll('cards')]);
-  const stats = {};
-  cards.forEach(c => { stats[c.memberId] = (stats[c.memberId]||0) + (c.total-c.used); });
-  members.sort((a,b) => a.name.localeCompare(b.name,'zh'));
 
+// ── View: Stats (按月/年切换) ─────────────────────────────────
+// Implements month/year period navigation and aggregates members/cards/txn data for the selected period.
+const STATS_STATE = { mode: 'month', ts: Date.now() };
+
+function periodBounds(mode, ts) {
+  const d = new Date(ts);
+  if (mode === 'month') {
+    const start = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+    const next = new Date(d.getFullYear(), d.getMonth() + 1, 1).getTime();
+    return {start, end: next};
+  } else {
+    const start = new Date(d.getFullYear(), 0, 1).getTime();
+    const next = new Date(d.getFullYear() + 1, 0, 1).getTime();
+    return {start, end: next};
+  }
+}
+
+function formatPeriodLabel(mode, ts) {
+  const d = new Date(ts);
+  if (mode === 'month') return `${d.getFullYear()}年${d.getMonth() + 1}月`;
+  return `${d.getFullYear()}年`;
+}
+
+window.prevPeriod = function() {
+  const s = STATS_STATE;
+  const d = new Date(s.ts);
+  if (s.mode === 'month') d.setMonth(d.getMonth() - 1);
+  else d.setFullYear(d.getFullYear() - 1);
+  s.ts = d.getTime();
+  vStats();
+};
+window.nextPeriod = function() {
+  const s = STATS_STATE;
+  const d = new Date(s.ts);
+  if (s.mode === 'month') d.setMonth(d.getMonth() + 1);
+  else d.setFullYear(d.getFullYear() + 1);
+  s.ts = d.getTime();
+  vStats();
+};
+window.setStatMode = function(m) {
+  if (m !== 'month' && m !== 'year') return;
+  STATS_STATE.mode = m;
+  // normalize ts to start of period
+  const d = new Date(STATS_STATE.ts);
+  if (m === 'month') {
+    STATS_STATE.ts = new Date(d.getFullYear(), d.getMonth(), 1).getTime();
+  } else {
+    STATS_STATE.ts = new Date(d.getFullYear(), 0, 1).getTime();
+  }
+  vStats();
+};
+
+async function vStats() {
+  const mode = STATS_STATE.mode;
+  const ts = STATS_STATE.ts;
+  const pb = periodBounds(mode, ts);
+  // render shell first
   document.getElementById('app').innerHTML = `
     <div class="nav">
-      <span class="nav-btn" aria-hidden="true" style="visibility:hidden">+ 添加</span>
-      <div class="nav-title">全部会员（${members.length}）</div>
-      <button class="nav-btn bold" style="text-align:right" onclick="navigate('addMember')">+ 添加</button>
+      <button class="nav-btn" onclick="goBack()">‹ 返回</button>
+      <div class="nav-title">数据统计</div>
+      <button class="nav-btn" style="visibility:hidden"> </button>
     </div>
-    <div class="page">
-      ${!members.length
-        ? `<div class="empty"><div class="empty-ic">👥</div><div class="empty-t">还没有会员</div></div>`
-        : `<div class="lcard mx mt16">` + members.map(m => {
-            const r = stats[m.id]||0;
-            const bc = r===0?'out':r<=3?'low':'';
-            return `<div class="mi" onclick="navigate('member',{id:'${m.id}'})">
-              <div class="av">${m.name[0]}</div>
-              <div style="flex:1"><div class="mn">${m.name}</div>${m.phone?`<div class="mp">${m.phone}</div>`:''}</div>
-              <span class="badge ${bc}">${r}次</span>
-            </div>`;
-          }).join('') + '</div>'
-      }
+    <div class="page no-ptr">
+      <div style="padding:12px 16px">
+        <div class="st-period">
+          <button class="st-arrow" onclick="prevPeriod()">‹</button>
+          <div class="st-label">${formatPeriodLabel(mode, ts)}</div>
+          <button class="st-arrow" onclick="nextPeriod()">›</button>
+        </div>
+
+        <div class="st-mode">
+          <button class="${mode==='month'?'on':''}" onclick="setStatMode('month')">按月</button>
+          <button class="${mode==='year'?'on':''}" onclick="setStatMode('year')">按年</button>
+        </div>
+
+        <div id="st-body">
+          <div style="padding:20px;text-align:center;color:var(--text2)">正在计算…</div>
+        </div>
+      </div>
+    </div>`;
+
+  // compute data
+  const [members, cards, txns] = await Promise.all([DB.getAll('members'), DB.getAll('cards'), DB.getAll('txns')]);
+  const inRange = t => t >= pb.start && t < pb.end;
+
+  // members
+  const newMembers = members.filter(m => m.createdAt && inRange(m.createdAt));
+
+  // cards opened in period (by createdAt) and charge txns in period
+  const newCards = cards.filter(c => c.createdAt && inRange(c.createdAt));
+  const chargeTxns = txns.filter(t => t.type === 'charge' && t.createdAt && inRange(t.createdAt));
+  const chargeSessions = chargeTxns.reduce((s,t)=>s+(t.sessions||0),0);
+  const revenue = chargeTxns.reduce((s,t)=>s+((t.paid||0)),0);
+
+  // uses (consumption)
+  const useTxns = txns.filter(t => t.type === 'use' && t.createdAt && inRange(t.createdAt));
+  const useCount = useTxns.reduce((s,t)=>s+(t.sessions||1),0); // sessions often 1 for 'use'
+
+  // active members: unique members who had any txn in period
+  const actSet = new Set();
+  txns.forEach(t => { if (t.createdAt && inRange(t.createdAt) && t.memberId) actSet.add(t.memberId); });
+  const activeMembers = actSet.size;
+
+  // remaining sessions added this period minus used this period (net new sessions)
+  const addedSessions = cards.filter(c => c.createdAt && inRange(c.createdAt)).reduce((s,c)=>s+(c.total||0),0);
+  const netSessions = addedSessions - useCount;
+
+  const stBody = document.getElementById('st-body');
+  stBody.innerHTML = `
+    <div class="st-grid">
+      <div class="st-card">
+        <div class="st-val blue">${newMembers.length}</div>
+        <div class="st-lbl">新增会员</div>
+      </div>
+      <div class="st-card">
+        <div class="st-val">${activeMembers}</div>
+        <div class="st-lbl">活跃会员（有操作）</div>
+      </div>
+      <div class="st-card">
+        <div class="st-val">${newCards.length}</div>
+        <div class="st-lbl">新增次卡（张）</div>
+      </div>
+      <div class="st-card">
+        <div class="st-val green">${useCount}</div>
+        <div class="st-lbl">划卡消费（次）</div>
+      </div>
+    </div>
+
+    <div class="st-break">
+      <div class="st-break-title">明细</div>
+      <div class="st-break-row"><div class="st-b-name">充值次数</div><div class="st-b-val">${chargeSessions} 次</div></div>
+      <div class="st-break-row"><div class="st-b-name">充值金额</div><div class="st-b-val">¥${revenue}</div></div>
+      <div class="st-break-row"><div class="st-b-name">本期新增可用次数（充入 - 消费）</div><div class="st-b-val">${netSessions} 次</div></div>
     </div>`;
 }
 
@@ -832,7 +1092,7 @@ async function vMember() {
       <div class="nav-title">${member.name}</div>
       <button class="nav-btn bold" style="text-align:right" onclick="navigate('addCard',{memberId:'${id}'})">开次卡</button>
     </div>
-    <div class="page notabs">
+    <div class="page nottabs">
 
       <div class="pcard">
         <div class="pc-shop">理发店会员卡${member.phone?' · '+member.phone:''}</div>
@@ -1198,11 +1458,11 @@ function vAddMember() {
       <div class="nav-title">新建会员</div>
       <button class="nav-btn bold" style="text-align:right" onclick="saveNewMember()">保存</button>
     </div>
-    <div class="page notabs">
+    <div class="page nottabs">
       <div class="sec" style="padding-top:20px">
         <div class="fcard">
           <div class="fr"><label class="fl">姓名</label><input class="fi" id="f-name" placeholder="必填" type="text" autocomplete="off"></div>
-          <div class="fr"><label class="fl">手机号</label><input class="fi" id="f-phone" placeholder="选填" type="tel"></div>
+          <div class="fr"><label class="fl">手机号</label><input class="fi" id="f-phone" placeholder="必填" type="tel"></div>
         </div>
 
         <div class="sec-title mt8">顺带开次卡（可跳过）</div>
@@ -1220,15 +1480,24 @@ function vAddMember() {
 window.saveNewMember = async function() {
   const name = (document.getElementById('f-name')?.value||'').trim();
   if (!name) { toast('请填写姓名'); return; }
+  const phone = (document.getElementById('f-phone')?.value||'').trim();
+  if (!phone) { toast('请填写手机号'); return; }
+
   const now = Date.now();
-  const member = {id:uid(), name, phone:(document.getElementById('f-phone')?.value||'').trim(), createdAt:now, updatedAt:now};
+  const member = {id:uid(), name, phone, createdAt:now, updatedAt:now};
   await DB.put('members', member);
 
+  // 顺带开卡：填了任一卡字段则全部必填校验
+  const cardType = getType('f');
   const sessions = parseInt(document.getElementById('f-sessions')?.value)||0;
-  if (sessions>0) {
-    const paid = parseFloat(document.getElementById('f-paid')?.value)||0;
+  const paidRaw = document.getElementById('f-paid')?.value;
+  const hasCardInput = cardType || sessions > 0 || (paidRaw !== undefined && paidRaw !== '');
+  if (hasCardInput) {
+    if (!cardType) { toast('请选择卡类型'); return; }
+    if (sessions <= 0) { toast('请填写次数'); return; }
+    const paid = parseFloat(paidRaw);
+    if (!paid && paid !== 0) { toast('请填写实收金额'); return; }
     const note = (document.getElementById('f-note')?.value||'').trim();
-    const cardType = getType('f');
     const card = {id:uid(), memberId:member.id, type:cardType, total:sessions, used:0, paid, note, createdAt:now, updatedAt:now};
     await DB.put('cards', card);
     await DB.put('txns', {id:uid(), memberId:member.id, cardId:card.id, cardType, type:'charge', sessions, paid, note, createdAt:now});
@@ -1248,7 +1517,7 @@ async function vAddCard() {
       <div class="nav-title">开次卡 · ${member?.name||''}</div>
       <button class="nav-btn bold" style="text-align:right" onclick="saveCard('${memberId}')">保存</button>
     </div>
-    <div class="page notabs">
+    <div class="page nottabs">
       <div class="sec" style="padding-top:20px">
         <div class="sec-title">卡类型</div>
         <div class="type-row" id="c-types">${CARD_TYPES.map(t=>`<button class="type-btn" data-type="${t}" onclick="pickType(this)">${t}</button>`).join('')}</div>
@@ -1269,9 +1538,11 @@ window.setN = n => { const i=document.getElementById('c-sessions'); if(i) i.valu
 
 window.saveCard = async function(memberId) {
   const cardType = getType('c');
+  if (!cardType) { toast('请选择卡类型'); return; }
   const sessions = parseInt(document.getElementById('c-sessions')?.value)||0;
-  if (sessions<=0) { toast('请输入次数'); return; }
-  const paid = parseFloat(document.getElementById('c-paid')?.value)||0;
+  if (sessions<=0) { toast('请填写次数'); return; }
+  const paid = parseFloat(document.getElementById('c-paid')?.value);
+  if (!paid && paid !== 0) { toast('请填写实收金额'); return; }
   const note = (document.getElementById('c-note')?.value||'').trim();
   const now = Date.now();
   const card = {id:uid(), memberId, type:cardType, total:sessions, used:0, paid, note, createdAt:now, updatedAt:now};
@@ -1279,7 +1550,7 @@ window.saveCard = async function(memberId) {
   await DB.put('txns', {id:uid(), memberId, cardId:card.id, cardType, type:'charge', sessions, paid, note, createdAt:now});
   const member = await DB.get('members', memberId);
   if (member) { member.updatedAt=now; await DB.put('members',member); }
-  toast(`已开 ${cardType?cardType+'·':''}${sessions} 次卡！`);
+  toast(`已开 ${cardType}·${sessions} 次卡！`);
   stack = [];
   navigate('member', {id:memberId}, false);
 };
@@ -1289,9 +1560,13 @@ async function vBackup() {
   const [members,cards,txns] = await Promise.all([DB.getAll('members'),DB.getAll('cards'),DB.getAll('txns')]);
   const cloudOn = Cloud.isOn();
   const cfg = Cloud.getCfg();
-  document.getElementById('app').innerHTML = `
-    <div class="nav"><div class="nav-title">备份与恢复</div></div>
-    <div class="page">
+    document.getElementById('app').innerHTML = `
+    <div class="nav">
+      <span class="nav-btn" aria-hidden="true" style="visibility:hidden"></span>
+      <div class="nav-title">备份与恢复</div>
+      <span class="nav-btn" aria-hidden="true" style="visibility:hidden"></span>
+    </div>
+    <div class="page no-ptr">
       <div class="sec" style="padding-top:20px">
         <div class="lcard">
           <div class="row"><span class="row-lbl">会员数</span><span class="row-val">${members.length} 人</span></div>
@@ -1390,14 +1665,15 @@ document.getElementById('cloud-indicator').addEventListener('click', e => {
     page = pg;
   };
 
-  document.addEventListener('touchstart', e => {
+    document.addEventListener('touchstart', e => {
     if (refreshing) return;
     const pg = e.target.closest('.page');
-    if (!pg || pg.scrollTop > 5) return;
+    // 如果页面标记了 no-ptr，则禁用下拉刷新（用于统计/备份页）
+    if (!pg || pg.scrollTop > 5 || pg.classList.contains('no-ptr')) return;
     ensurePtr(pg);
     sy = e.touches[0].clientY;
     pulling = true;
-  }, {passive:true});
+    }, {passive:true});
 
   document.addEventListener('touchmove', e => {
     if (!pulling || refreshing) return;

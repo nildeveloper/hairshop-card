@@ -445,7 +445,10 @@ const Cloud = (() => {
     const ts = await loadTurnstile();
     if (!ts) return null;
     const c = document.createElement('div');
-    c.style.cssText = 'position:fixed;left:-9999px;top:-9999px';
+    // size:'invisible' 自身不渲染可见 UI；容器只需在 DOM 里有正常布局，
+    // 不要用 left:-9999px / display:none / visibility:hidden，
+    // 否则 Turnstile 反爬会判为可疑环境 → 报错 600010
+    c.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;overflow:hidden;pointer-events:none';
     document.body.appendChild(c);
     return new Promise((resolve, reject) => {
       let done = false;

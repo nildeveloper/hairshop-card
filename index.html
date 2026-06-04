@@ -420,7 +420,47 @@ const DB = (() => {
 const Cloud = (() => {
   const LS = 'haircard_cloud';
   const ENDPOINT = '/api/data';
+  // 填上 Cloudflare Turnstile sitekey 以启用 PUT 人机校验；留空则跳过（开发期）
+  const TURNSTILE_SITEKEY = '0x4AAAAAADej9dJ2nBUuYEx5';
   let cfg = null, timer = null, busy = false;
+
+  // ── Turnstile：懒加载脚本，invisible 模式拿一次性 token ──
+  let _tsLoadPromise = null;
+  const loadTurnstile = () => {
+    if (!TURNSTILE_SITEKEY) return Promise.resolve(null);
+    if (_tsLoadPromise) return _tsLoadPromise;
+    _tsLoadPromise = new Promise((resolve, reject) => {
+      if (window.turnstile) return resolve(window.turnstile);
+      const s = document.createElement('script');
+      s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
+      s.async = true; s.defer = true;
+      s.onload = () => resolve(window.turnstile);
+      s.onerror = () => { _tsLoadPromise = null; reject(new Error('turnstile script load failed')); };
+      document.head.appendChild(s);
+    });
+    return _tsLoadPromise;
+  };
+  const getTurnstileToken = async () => {
+    if (!TURNSTILE_SITEKEY) return null;
+    const ts = await loadTurnstile();
+    if (!ts) return null;
+    const c = document.createElement('div');
+    c.style.cssText = 'position:fixed;left:-9999px;top:-9999px';
+    document.body.appendChild(c);
+    return new Promise((resolve, reject) => {
+      let done = false;
+      const finish = (fn, val) => { if (done) return; done = true; try { ts.remove(widgetId); } catch (e) {} c.remove(); fn(val); };
+      const widgetId = ts.render(c, {
+        sitekey: TURNSTILE_SITEKEY,
+        size: 'invisible',
+        callback: token => finish(resolve, token),
+        'error-callback': () => finish(reject, new Error('turnstile error')),
+        'expired-callback': () => finish(reject, new Error('turnstile expired')),
+      });
+      ts.execute(widgetId);
+      setTimeout(() => finish(reject, new Error('turnstile timeout')), 10000);
+    });
+  };
 
   try { cfg = JSON.parse(localStorage.getItem(LS) || 'null'); } catch { cfg = null; }
 
@@ -650,11 +690,21 @@ const Cloud = (() => {
         const jsonStr = JSON.stringify({data, modifiedAt: Date.now(), v: 1});
         const encKey = await deriveEncKey(cfg.shopKey, cfg.password);
         const encrypted = await enc(jsonStr, encKey);
+        const headers = {'content-type':'application/octet-stream'};
+        try {
+          const tsToken = await getTurnstileToken();
+          if (tsToken) headers['cf-turnstile-token'] = tsToken;
+        } catch (e) {
+          // 拿不到 token 也照样发；服务端会决定接不接
+          console.warn('[sync] turnstile token unavailable:', e.message);
+        }
         const r = await fetch(`${ENDPOINT}?key=${cfg.hashedKey}`, {
           method:'PUT',
-          headers:{'content-type':'application/octet-stream'},
+          headers,
           body: encrypted
         });
+        if (r.status === 403) throw new Error('人机校验失败');
+        if (r.status === 503) throw new Error('云端今日写入额度已满，明天再试');
         if (!r.ok) throw new Error('http '+r.status);
         cfg.lastSync = Date.now();
         save(cfg);
@@ -667,7 +717,10 @@ const Cloud = (() => {
       return true;
     } catch (e) {
       console.warn('[sync] failed', e);
-      setStatus('fail', '同步失败 · 点此重试');
+      const msg = (e && e.message && /[一-龥]/.test(e.message))
+        ? `同步失败：${e.message}`
+        : '同步失败 · 点此重试';
+      setStatus('fail', msg);
       return false;
     } finally {
       busy = false;

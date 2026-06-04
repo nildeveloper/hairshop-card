@@ -293,6 +293,7 @@ body{
   color:var(--blue);cursor:pointer;font-family:inherit;
 }
 .modal-act.primary{font-weight:600}
+.modal-act.danger{color:var(--red)}
 .modal-act:active{background:rgba(0,0,0,.06)}
 .modal-act + .modal-act{border-left:.5px solid rgba(0,0,0,.1)}
 </style>
@@ -354,6 +355,19 @@ const DB = (() => {
     put: (store,obj) => run([store],'readwrite',(tx,ok) => { const r=tx.objectStore(store).put(obj); r.onsuccess=()=>ok(); }),
     del: (store,id) => run([store],'readwrite',(tx,ok) => { const r=tx.objectStore(store).delete(id); r.onsuccess=()=>ok(); }),
     byIdx: (store,idx,val) => run([store],'readonly',(tx,ok) => { const r=tx.objectStore(store).index(idx).getAll(val); r.onsuccess=()=>ok(r.result); }),
+    // 原子多 store 写入：ops = [{op:'put', store, obj} | {op:'del', store, id}]
+    multi: (ops) => {
+      if (!ops.length) return Promise.resolve();
+      const stores = [...new Set(ops.map(o => o.store))];
+      return run(stores,'readwrite',(tx,ok) => {
+        ops.forEach(o => {
+          const s = tx.objectStore(o.store);
+          if (o.op === 'put') s.put(o.obj);
+          else if (o.op === 'del') s.delete(o.id);
+        });
+        tx.oncomplete = () => ok();
+      });
+    },
 
     async upgrade() {
       const d = await open();
@@ -413,8 +427,9 @@ const Cloud = (() => {
   const save = c => { cfg = c; c ? localStorage.setItem(LS, JSON.stringify(c)) : localStorage.removeItem(LS); };
 
   const genShopKey = () => {
-    const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 去掉 0/O/1/I 等易混
-    return Array.from({length:8}, () => c[Math.floor(Math.random()*c.length)]).join('');
+    const c = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 去掉 0/O/1/I 等易混；32 字符正好可整除 256，无偏置
+    const buf = crypto.getRandomValues(new Uint8Array(8));
+    return Array.from(buf, b => c[b % c.length]).join('');
   };
 
   const sha256 = async s => {
@@ -461,6 +476,8 @@ const Cloud = (() => {
   const setStatus = (state, msg) => {
     const el = document.getElementById('cloud-indicator');
     if (!el) return;
+    // 保留 fail 状态：只能由 syncing/ok 覆盖，避免被静默 autoSync 的 null 清掉
+    if (state === null && el.classList.contains('fail')) return;
     if (okHideTimer) { clearTimeout(okHideTimer); okHideTimer = null; }
     if (!state) { el.className = ''; el.textContent = ''; return; }
     el.className = 'show ' + state;
@@ -492,21 +509,20 @@ const Cloud = (() => {
   };
 
   // ── Pull: 拉取远端数据 ──────────────────────────────────
+  // 返回 { ok:true, data: object|null }（data=null 表示真的没数据 / 404）
+  // 或 { ok:false, reason }（网络、5xx、解密失败等真错误 —— 此时禁止 push，避免陈旧覆盖）
   const pull = async () => {
-    if (!isOn()) { console.log('[pull] cloud off'); return null; }
+    if (!isOn()) return { ok:true, data:null };
     try {
       const r = await fetch(`${ENDPOINT}?key=${cfg.hashedKey}`, {
         headers: {'cache-control': 'no-cache'}
       });
-      console.log('[pull] status:', r.status, 'type:', r.headers.get('content-type'));
-      if (r.status === 404) { console.log('[pull] 404 no data'); return null; }
-      if (!r.ok) { console.log('[pull] not ok'); return null; }
+      if (r.status === 404) return { ok:true, data:null };
+      if (!r.ok) return { ok:false, reason:'http_'+r.status };
       const j = await _decode(r, cfg.shopKey, cfg.password);
-      console.log('[pull] keys:', Object.keys(j), 'hasData:', !!j.data, 'members:', j.data?.members?.length);
-      return j.data || null;
+      return { ok:true, data: j.data || null };
     } catch (e) {
-      console.warn('[pull] error:', e.message);
-      return null;
+      return { ok:false, reason: e.message || 'pull_error' };
     }
   };
 
@@ -576,8 +592,8 @@ const Cloud = (() => {
         await DB.put('deleted', t);
       }
 
-      // 清理过期墓碑：超过 30 天且对应记录确实不存在了
-      const cutoff = Date.now() - 30 * 86400000;
+      // 清理过期墓碑：超过 180 天且对应记录确实不存在了（容忍员工长期不开 App）
+      const cutoff = Date.now() - 180 * 86400000;
       const allIds = new Set([...mMembers.keys(), ...mCards.keys(), ...mTxns.keys()]);
       const finalTombs = [...tombMap.values()].filter(t => {
         if (t.deletedAt < cutoff && !allIds.has(t.id)) return false;
@@ -619,9 +635,15 @@ const Cloud = (() => {
     if (needPush) setStatus('syncing', '同步中…');
     try {
       // 1. 拉取远端
-      const remote = await pull();
+      const pulled = await pull();
+      if (!pulled.ok) {
+        // 真错误（网络/5xx/解密失败）：禁止 push，避免用本地陈旧快照覆盖云端
+        console.warn('[sync] pull failed:', pulled.reason);
+        setStatus('fail', '同步失败 · 点此重试');
+        return false;
+      }
       // 2. 合并
-      const merged = await merge(remote);
+      const merged = await merge(pulled.data);
       // 3. 如果需要上传
       if (needPush) {
         const data = await DB.exportAll();
@@ -639,9 +661,9 @@ const Cloud = (() => {
       }
       // 有实际数据变动时才显示状态
       if (needPush || merged) setStatus('ok', '已同步');
-      else setStatus(null); // 无变动，静默
-      // 4. 刷新视图
-      if (typeof render === 'function') render();
+      else setStatus(null); // 无变动，静默（setStatus 内部会保留已有 fail）
+      // 4. 刷新视图：表单页跳过，避免清空用户正在填写的输入
+      if (typeof render === 'function' && (needPush || merged) && !FORM_VIEWS.includes(curView)) render();
       return true;
     } catch (e) {
       console.warn('[sync] failed', e);
@@ -701,7 +723,7 @@ const Cloud = (() => {
 })();
 
 // 包裹 DB 的写操作，触发自动云同步（merge 期间静默，避免多余 push）
-['put','del'].forEach(m => {
+['put','del','multi'].forEach(m => {
   const orig = DB[m].bind(DB);
   DB[m] = async function(...args) {
     const r = await orig(...args);
@@ -713,7 +735,9 @@ const Cloud = (() => {
 // ── Utils ──────────────────────────────────────────────────
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2,7);
 const CARD_TYPES = ['洗','剪','染','烫'];
-const typeBadge = (t) => t ? `<span class="type-badge t-${t}">${t}</span>` : '';
+// HTML 转义，所有用户输入字段插入 innerHTML 前必须经过
+const esc = s => String(s ?? '').replace(/[<>&"']/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','"':'&quot;',"'":'&#39;'}[c]));
+const typeBadge = (t) => t ? `<span class="type-badge t-${esc(t)}">${esc(t)}</span>` : '';
 window.pickType = function(el) {
   el.parentNode.querySelectorAll('.type-btn').forEach(b => b.classList.remove('on'));
   el.classList.add('on');
@@ -764,6 +788,7 @@ function toast(msg) {
 // ── Router ─────────────────────────────────────────────────
 let curView = 'home', curParams = {}, stack = [];
 const MAIN_VIEWS = ['home','members','stats','backup'];
+const FORM_VIEWS = ['addMember','addCard']; // 这些视图后台同步时不重渲，避免吞掉用户输入
 
 function goTab(view) { stack=[]; navigate(view,{},false); }
 function goBack() { const p=stack.pop(); if(p) navigate(p.view,p.params,false); else goTab('home'); }
@@ -840,7 +865,7 @@ async function vHome() {
 
         <div class="st-break" style="margin-top:12px">
           <div class="st-break-title">低余额提醒（剩余 ≤ 3）</div>
-          ${lowList.length ? lowList.map(l=>`<div class="st-break-row" onclick="navigate('member',{id:'${l.id}'})"><div class="st-b-name">${l.name}</div><div class="st-b-val">剩 ${l.remain} 次</div></div>`).join('') : '<div class="st-break-row"><div class="st-b-name">暂无低余额提醒</div><div></div></div>'}
+          ${lowList.length ? lowList.map(l=>`<div class="st-break-row" onclick="navigate('member',{id:'${l.id}'})"><div class="st-b-name">${esc(l.name)}</div><div class="st-b-val">剩 ${l.remain} 次</div></div>`).join('') : '<div class="st-break-row"><div class="st-b-name">暂无低余额提醒</div><div></div></div>'}
         </div>
 
         <div class="sec-title mt8">最近操作</div>
@@ -853,11 +878,11 @@ async function vHome() {
             else actionText = `充值 · ${(t.sessions||0)} 次`;
             const badgeHtml = t.cardType ? (' ' + typeBadge(t.cardType)) : '';
             const paidHtml = (t.type === 'charge' && t.paid) ? (' · ¥' + t.paid) : '';
-            const note = t.note ? ` · ${t.note}` : '';
+            const note = t.note ? ` · ${esc(t.note)}` : '';
             const actionHtml = actionText + badgeHtml + paidHtml;
             return `<div class="ti" onclick="navigate('member',{id:'${t.memberId}'})">
               <div class="tic ${t.type}">${t.type==='use'?'✂️':'💳'}</div>
-              <div class="tt"><div class="ttitle">${m.name}</div><div class="ttime" style="font-size:13px;color:var(--text2)">${actionHtml}${note}</div><div class="ttime">${fmtFull(t.createdAt)}</div></div>
+              <div class="tt"><div class="ttitle">${esc(m.name)}</div><div class="ttime" style="font-size:13px;color:var(--text2)">${actionHtml}${note}</div><div class="ttime">${fmtFull(t.createdAt)}</div></div>
               <div class="tamt ${t.type}">${t.type==='use' ? '-'+(t.sessions||1)+' 次' : '+'+(t.sessions||0)+' 次'}</div>
             </div>`;
           }).join('') : `<div class="empty"><div class="empty-ic">📭</div><div class="empty-t">暂无操作记录</div></div>`}
@@ -927,8 +952,8 @@ async function loadList(q, mode = 'recent') {
     const r = stats[m.id]||0;
     const bc = r===0?'out':r<=3?'low':'';
     return `<div class="mi" onclick="navigate('member',{id:'${m.id}'})">
-      <div class="av">${m.name[0]}</div>
-      <div style="flex:1"><div class="mn">${m.name}</div>${m.phone?`<div class="mp">${m.phone}</div>`:''}</div>
+      <div class="av">${esc(m.name[0]||'')}</div>
+      <div style="flex:1"><div class="mn">${esc(m.name)}</div>${m.phone?`<div class="mp">${esc(m.phone)}</div>`:''}</div>
       <span class="badge ${bc}">${r}次</span>
     </div>`;
   }).join('') + '</div>';
@@ -1089,13 +1114,13 @@ async function vMember() {
   document.getElementById('app').innerHTML = `
     <div class="nav">
       <button class="nav-btn" onclick="goBack()">‹ 返回</button>
-      <div class="nav-title">${member.name}</div>
+      <div class="nav-title">${esc(member.name)}</div>
       <button class="nav-btn bold" style="text-align:right" onclick="navigate('addCard',{memberId:'${id}'})">开次卡</button>
     </div>
-    <div class="page nottabs">
+    <div class="page notabs">
 
       <div class="pcard">
-        <div class="pc-shop">理发店会员卡${member.phone?' · '+member.phone:''}</div>
+        <div class="pc-shop">理发店会员卡${member.phone?' · '+esc(member.phone):''}</div>
         <div class="pc-num">${totalRemain}</div>
         <div class="pc-unit">剩余次数</div>
         <div class="pc-line"></div>
@@ -1122,7 +1147,7 @@ async function vMember() {
               return `<div class="cr">
                 <div class="cr-left">
                   <div class="cr-name">${typeBadge(c.type)}${c.total}次卡${c.paid?'（¥'+c.paid+'）':''}</div>
-                  <div class="cr-sub">${fmtFull(c.createdAt)}${c.note?' · '+c.note:''}</div>
+                  <div class="cr-sub">${fmtFull(c.createdAt)}${c.note?' · '+esc(c.note):''}</div>
                 </div>
                 <div class="cr-right">
                   <div class="cr-remain${r===0?' done':''}">剩 ${r} 次</div>
@@ -1143,7 +1168,7 @@ async function vMember() {
                 <div class="tic ${t.type}">${t.type==='use'?'✂️':'💳'}</div>
                 <div class="tt">
                   <div class="ttitle">${t.type==='use'?'划卡消费':('充值 '+t.sessions+' 次'+(t.paid?'（¥'+t.paid+'）':''))}${t.cardType?' · '+typeBadge(t.cardType):''}</div>
-                  <div class="ttime">${fmtFull(t.createdAt)}${t.note?' · '+t.note:''}</div>
+                  <div class="ttime">${fmtFull(t.createdAt)}${t.note?' · '+esc(t.note):''}</div>
                 </div>
                 <div class="tamt ${t.type}">${t.type==='use'?'-1 次':'+'+t.sessions+' 次'}</div>
               </div>
@@ -1225,6 +1250,30 @@ function showDialog({title, sub, html, confirmText='确认', cancelText='取消'
   });
 }
 
+// 自定义确认弹窗，替代原生 confirm()，统一 iOS 风格
+function confirmDialog({title, message, confirmText='确认', cancelText='取消', danger=false}) {
+  return new Promise(resolve => {
+    const mask = document.createElement('div');
+    mask.className = 'modal-mask';
+    mask.innerHTML = `
+      <div class="modal" onclick="event.stopPropagation()">
+        <div class="modal-body">
+          <div class="modal-title">${title}</div>
+          ${message ? `<div class="modal-sub" style="white-space:pre-line">${message}</div>` : ''}
+        </div>
+        <div class="modal-acts">
+          <button class="modal-act" data-act="cancel">${cancelText}</button>
+          <button class="modal-act primary${danger ? ' danger' : ''}" data-act="ok">${confirmText}</button>
+        </div>
+      </div>`;
+    const close = v => { mask.remove(); resolve(v); };
+    mask.addEventListener('click', e => { if (e.target === mask) close(false); });
+    mask.querySelector('[data-act="cancel"]').onclick = () => close(false);
+    mask.querySelector('[data-act="ok"]').onclick = () => close(true);
+    document.body.appendChild(mask);
+  });
+}
+
 window.cloudSetup = async function() {
   const r1 = await showDialog({
     title: '开启云端备份',
@@ -1251,9 +1300,9 @@ window.cloudSetup = async function() {
     html: `
       <div style="background:white;border-radius:8px;padding:14px;margin:8px 0">
         <div style="font-size:12px;color:var(--text2);margin-bottom:4px;text-align:left">店铺秘钥</div>
-        <div style="font-family:'SF Mono',Menlo,monospace;font-size:26px;font-weight:700;letter-spacing:3px;text-align:center;color:var(--blue)">${shopKey}</div>
+        <div style="font-family:'SF Mono',Menlo,monospace;font-size:26px;font-weight:700;letter-spacing:3px;text-align:center;color:var(--blue)">${esc(shopKey)}</div>
         <div style="font-size:12px;color:var(--text2);margin:12px 0 4px;text-align:left">密码</div>
-        <div style="font-family:'SF Mono',Menlo,monospace;font-size:18px;text-align:center;word-break:break-all">${r1.password}</div>
+        <div style="font-family:'SF Mono',Menlo,monospace;font-size:18px;text-align:center;word-break:break-all">${esc(r1.password)}</div>
       </div>
       <input class="modal-input" id="d-confirm" placeholder="请再输入一遍秘钥确认你已记录" autocomplete="off" maxlength="8" style="text-transform:uppercase;font-family:monospace;letter-spacing:2px;text-align:center">
     `,
@@ -1279,7 +1328,13 @@ window.cloudSetup = async function() {
 window.cloudRestore = async function() {
   const local = await DB.getAll('members');
   if (local.length > 0) {
-    if (!confirm(`当前手机上已有 ${local.length} 位会员的数据。\n\n恢复将完全覆盖现有数据，无法撤销。\n\n确定继续？`)) return;
+    const ok = await confirmDialog({
+      title: '覆盖现有数据？',
+      message: `当前手机已有 ${local.length} 位会员。\n恢复将完全覆盖现有数据，无法撤销。`,
+      confirmText: '确认恢复',
+      danger: true
+    });
+    if (!ok) return;
   }
 
   const r = await showDialog({
@@ -1293,7 +1348,7 @@ window.cloudRestore = async function() {
     validate(m) {
       const k = m.querySelector('#d-key').value.trim().toUpperCase();
       const p = m.querySelector('#d-pwd').value;
-      if (!/^[A-Z2-9]{6,32}$/.test(k)) { toast('秘钥格式有误'); return false; }
+      if (!/^[A-Z2-9]{8}$/.test(k)) { toast('秘钥应为 8 位字母数字'); return false; }
       if (!p) { toast('请输入密码'); return false; }
       return {shopKey: k, password: p};
     }
@@ -1327,9 +1382,9 @@ window.cloudShowKey = async function() {
     html: `
       <div style="background:white;border-radius:8px;padding:14px;margin:8px 0">
         <div style="font-size:12px;color:var(--text2);margin-bottom:4px;text-align:left">店铺秘钥</div>
-        <div style="font-family:'SF Mono',Menlo,monospace;font-size:26px;font-weight:700;letter-spacing:3px;text-align:center;color:var(--blue)">${cfg.shopKey}</div>
+        <div style="font-family:'SF Mono',Menlo,monospace;font-size:26px;font-weight:700;letter-spacing:3px;text-align:center;color:var(--blue)">${esc(cfg.shopKey)}</div>
         <div style="font-size:12px;color:var(--text2);margin:12px 0 4px;text-align:left">密码</div>
-        <div style="font-family:'SF Mono',Menlo,monospace;font-size:18px;text-align:center;word-break:break-all">${cfg.password}</div>
+        <div style="font-family:'SF Mono',Menlo,monospace;font-size:18px;text-align:center;word-break:break-all">${esc(cfg.password)}</div>
       </div>
     `,
     confirmText: '复制',
@@ -1343,7 +1398,13 @@ window.cloudShowKey = async function() {
 };
 
 window.cloudDisconnect = async function() {
-  if (!confirm('断开后本设备不再自动同步。\n本地数据、云端数据均保留。\n下次仍可用秘钥+密码恢复。\n\n确定断开？')) return;
+  const ok = await confirmDialog({
+    title: '断开云端同步？',
+    message: '断开后本设备不再自动同步。\n本地数据、云端数据均保留。\n下次仍可用秘钥+密码恢复。',
+    confirmText: '断开',
+    danger: true
+  });
+  if (!ok) return;
   Cloud.disconnect();
   toast('已断开云端');
   vBackup();
@@ -1371,7 +1432,7 @@ function pickCard(cards, memberName) {
       <div class="modal" onclick="event.stopPropagation()">
         <div class="modal-body">
           <div class="modal-title">选择扣减的卡</div>
-          <div class="modal-sub">${memberName} · 剩余 ${cards.length} 张卡可用</div>
+          <div class="modal-sub">${esc(memberName)} · 剩余 ${cards.length} 张卡可用</div>
           ${items}
         </div>
         <div class="modal-acts">
@@ -1395,57 +1456,75 @@ function pickCard(cards, memberName) {
   });
 }
 
+let _doUseInFlight = false;
 window.doUse = async function(memberId) {
-  const cards = await DB.byIdx('cards','mid',memberId);
-  const activeCards = cards.filter(c=>c.total>c.used).sort((a,b)=>a.createdAt-b.createdAt);
-  if (!activeCards.length) { toast('没有剩余次数'); return; }
+  if (_doUseInFlight) return;            // 防连击：promptNote 弹出期间再次点击直接忽略
+  _doUseInFlight = true;
+  try {
+    const cards = await DB.byIdx('cards','mid',memberId);
+    const activeCards = cards.filter(c=>c.total>c.used).sort((a,b)=>a.createdAt-b.createdAt);
+    if (!activeCards.length) { toast('没有剩余次数'); return; }
 
-  const member = await DB.get('members', memberId);
+    const member = await DB.get('members', memberId);
 
-  // 多张卡时让用户选，单张卡自动选
-  let card;
-  if (activeCards.length === 1) {
-    card = activeCards[0];
-  } else {
-    card = await pickCard(activeCards, member.name);
-    if (!card) return;
+    // 多张卡时让用户选，单张卡自动选
+    let card;
+    if (activeCards.length === 1) {
+      card = activeCards[0];
+    } else {
+      card = await pickCard(activeCards, member.name);
+      if (!card) return;
+    }
+
+    const result = await promptNote({
+      title: '划卡消费',
+      sub: `${esc(member.name)} · ${card.type?esc(card.type)+'·':''}剩余 ${card.total-card.used} 次`,
+      placeholder: '选填备注',
+      quick: ['剪发','洗剪吹','烫发','染发','造型']
+    });
+    if (result === null) return;
+
+    card.used += 1;
+    const now = Date.now();
+    card.updatedAt = now;
+    member.updatedAt = now;
+    const note = result.note || '';
+    // 原子写：cards / txns / members 同一事务，避免中途失败导致 used 与 txn 不一致
+    await DB.multi([
+      {op:'put', store:'cards', obj:card},
+      {op:'put', store:'txns', obj:{id:uid(), memberId, cardId:card.id, cardType:card.type||'', type:'use', sessions:1, note, createdAt:now}},
+      {op:'put', store:'members', obj:member},
+    ]);
+
+    const all = await DB.byIdx('cards','mid',memberId);
+    const remain = all.reduce((s,c)=>s+(c.total-c.used),0);
+    toast(remain<=3 && remain>0 ? `已划卡！仅剩 ${remain} 次，建议续卡 🔔` : `划卡成功！剩余 ${remain} 次`);
+    vMember();
+  } finally {
+    _doUseInFlight = false;
   }
-
-  const result = await promptNote({
-    title: '划卡消费',
-    sub: `${member.name} · ${card.type?card.type+'·':''}剩余 ${card.total-card.used} 次`,
-    placeholder: '选填备注',
-    quick: ['剪发','洗剪吹','烫发','染发','造型']
-  });
-  if (result === null) return;
-
-  card.used += 1;
-  const now = Date.now();
-  card.updatedAt = now;
-  const note = result.note || '';
-  await DB.put('cards', card);
-  await DB.put('txns', {id:uid(), memberId, cardId:card.id, cardType:card.type||'', type:'use', sessions:1, note, createdAt:now});
-
-  member.updatedAt = now;
-  await DB.put('members', member);
-
-  const all = await DB.byIdx('cards','mid',memberId);
-  const remain = all.reduce((s,c)=>s+(c.total-c.used),0);
-  toast(remain<=3 && remain>0 ? `已划卡！仅剩 ${remain} 次，建议续卡 🔔` : `划卡成功！剩余 ${remain} 次`);
-  vMember();
 };
 
 window.doDelete = async function(id) {
-  if (!confirm('确认删除此会员及全部记录？此操作不可恢复。')) return;
+  const ok = await confirmDialog({
+    title: '删除此会员？',
+    message: '该会员及全部次卡、操作记录将被删除，无法恢复。',
+    confirmText: '删除',
+    danger: true
+  });
+  if (!ok) return;
   const [cards, txns] = await Promise.all([DB.byIdx('cards','mid',id), DB.byIdx('txns','mid',id)]);
   const now = Date.now();
-  // 创建墓碑记录，用于双端同步时防止“复活”
-  await DB.put('deleted', {id, type:'member', deletedAt:now});
-  for (const c of cards) await DB.put('deleted', {id:c.id, type:'card', deletedAt:now});
-  for (const t of txns) await DB.put('deleted', {id:t.id, type:'txn', deletedAt:now});
-  // 实际删除
-  await DB.del('members', id);
-  await Promise.all([...cards.map(c=>DB.del('cards',c.id)), ...txns.map(t=>DB.del('txns',t.id))]);
+  // 墓碑 + 实际删除：放在同一事务，避免半截状态
+  const ops = [
+    {op:'put', store:'deleted', obj:{id, type:'member', deletedAt:now}},
+    ...cards.map(c => ({op:'put', store:'deleted', obj:{id:c.id, type:'card', deletedAt:now}})),
+    ...txns.map(t => ({op:'put', store:'deleted', obj:{id:t.id, type:'txn',  deletedAt:now}})),
+    {op:'del', store:'members', id},
+    ...cards.map(c => ({op:'del', store:'cards', id:c.id})),
+    ...txns.map(t => ({op:'del', store:'txns',  id:t.id})),
+  ];
+  await DB.multi(ops);
   toast('已删除');
   goTab('home');
 };
@@ -1458,7 +1537,7 @@ function vAddMember() {
       <div class="nav-title">新建会员</div>
       <button class="nav-btn bold" style="text-align:right" onclick="saveNewMember()">保存</button>
     </div>
-    <div class="page nottabs">
+    <div class="page notabs">
       <div class="sec" style="padding-top:20px">
         <div class="fcard">
           <div class="fr"><label class="fl">姓名</label><input class="fi" id="f-name" placeholder="必填" type="text" autocomplete="off"></div>
@@ -1483,25 +1562,34 @@ window.saveNewMember = async function() {
   const phone = (document.getElementById('f-phone')?.value||'').trim();
   if (!phone) { toast('请填写手机号'); return; }
 
-  const now = Date.now();
-  const member = {id:uid(), name, phone, createdAt:now, updatedAt:now};
-  await DB.put('members', member);
-
-  // 顺带开卡：填了任一卡字段则全部必填校验
+  // 顺带开卡：先把所有校验做完，再统一落库；否则会员会"裸"入库（无卡僵尸会员）
   const cardType = getType('f');
   const sessions = parseInt(document.getElementById('f-sessions')?.value)||0;
   const paidRaw = document.getElementById('f-paid')?.value;
+  const note = (document.getElementById('f-note')?.value||'').trim();
   const hasCardInput = cardType || sessions > 0 || (paidRaw !== undefined && paidRaw !== '');
+  let cardWrites = [];
   if (hasCardInput) {
     if (!cardType) { toast('请选择卡类型'); return; }
     if (sessions <= 0) { toast('请填写次数'); return; }
     const paid = parseFloat(paidRaw);
-    if (!paid && paid !== 0) { toast('请填写实收金额'); return; }
-    const note = (document.getElementById('f-note')?.value||'').trim();
-    const card = {id:uid(), memberId:member.id, type:cardType, total:sessions, used:0, paid, note, createdAt:now, updatedAt:now};
-    await DB.put('cards', card);
-    await DB.put('txns', {id:uid(), memberId:member.id, cardId:card.id, cardType, type:'charge', sessions, paid, note, createdAt:now});
+    if (!Number.isFinite(paid) || paid < 0) { toast('请填写实收金额'); return; }
+    const now0 = Date.now();
+    const memberId = uid();
+    const cardId = uid();
+    cardWrites = [
+      {op:'put', store:'cards', obj:{id:cardId, memberId, type:cardType, total:sessions, used:0, paid, note, createdAt:now0, updatedAt:now0}},
+      {op:'put', store:'txns',  obj:{id:uid(), memberId, cardId, cardType, type:'charge', sessions, paid, note, createdAt:now0}},
+    ];
+    cardWrites._memberId = memberId;
+    cardWrites._now = now0;
   }
+
+  const now = cardWrites._now || Date.now();
+  const memberId = cardWrites._memberId || uid();
+  const member = {id:memberId, name, phone, createdAt:now, updatedAt:now};
+  // 原子写：会员 + 卡 + 充值流水同一事务，要么全成、要么全败
+  await DB.multi([{op:'put', store:'members', obj:member}, ...cardWrites]);
   toast('已添加');
   stack = [];
   navigate('member', {id:member.id}, false);
@@ -1514,10 +1602,10 @@ async function vAddCard() {
   document.getElementById('app').innerHTML = `
     <div class="nav">
       <button class="nav-btn" onclick="goBack()">取消</button>
-      <div class="nav-title">开次卡 · ${member?.name||''}</div>
+      <div class="nav-title">开次卡 · ${esc(member?.name||'')}</div>
       <button class="nav-btn bold" style="text-align:right" onclick="saveCard('${memberId}')">保存</button>
     </div>
-    <div class="page nottabs">
+    <div class="page notabs">
       <div class="sec" style="padding-top:20px">
         <div class="sec-title">卡类型</div>
         <div class="type-row" id="c-types">${CARD_TYPES.map(t=>`<button class="type-btn" data-type="${t}" onclick="pickType(this)">${t}</button>`).join('')}</div>
@@ -1542,15 +1630,19 @@ window.saveCard = async function(memberId) {
   const sessions = parseInt(document.getElementById('c-sessions')?.value)||0;
   if (sessions<=0) { toast('请填写次数'); return; }
   const paid = parseFloat(document.getElementById('c-paid')?.value);
-  if (!paid && paid !== 0) { toast('请填写实收金额'); return; }
+  if (!Number.isFinite(paid) || paid < 0) { toast('请填写实收金额'); return; }
   const note = (document.getElementById('c-note')?.value||'').trim();
   const now = Date.now();
   const card = {id:uid(), memberId, type:cardType, total:sessions, used:0, paid, note, createdAt:now, updatedAt:now};
-  await DB.put('cards', card);
-  await DB.put('txns', {id:uid(), memberId, cardId:card.id, cardType, type:'charge', sessions, paid, note, createdAt:now});
   const member = await DB.get('members', memberId);
-  if (member) { member.updatedAt=now; await DB.put('members',member); }
-  toast(`已开 ${cardType}·${sessions} 次卡！`);
+  const writes = [
+    {op:'put', store:'cards', obj:card},
+    {op:'put', store:'txns',  obj:{id:uid(), memberId, cardId:card.id, cardType, type:'charge', sessions, paid, note, createdAt:now}},
+  ];
+  if (member) { member.updatedAt = now; writes.push({op:'put', store:'members', obj:member}); }
+  // 原子写：卡 + 充值流水 + 会员同一事务
+  await DB.multi(writes);
+  toast(`已开 ${esc(cardType)}·${sessions} 次卡！`);
   stack = [];
   navigate('member', {id:memberId}, false);
 };
@@ -1578,7 +1670,7 @@ async function vBackup() {
         <div class="sec-title" style="margin-top:24px">☁️ 云端备份${cloudOn?' · 已开启':''}</div>
         ${cloudOn ? `
           <div class="lcard">
-            <div class="row"><span class="row-lbl">店铺秘钥</span><span class="row-val" style="font-family:monospace;font-weight:700;letter-spacing:1px">${cfg.shopKey}</span></div>
+            <div class="row"><span class="row-lbl">店铺秘钥</span><span class="row-val" style="font-family:monospace;font-weight:700;letter-spacing:1px">${esc(cfg.shopKey)}</span></div>
             <div class="row"><span class="row-lbl">上次同步</span><span class="row-val">${cfg.lastSync?fmtFull(cfg.lastSync):'未同步'}</span></div>
           </div>
           <button class="btn btn-blue mt8" onclick="cloudPushNow()">⬆️ &nbsp; 立即同步到云端</button>
@@ -1631,7 +1723,13 @@ window.doImport = async function(e) {
   try { data = JSON.parse(await file.text()); } catch { toast('文件格式有误'); return; }
   if (!Array.isArray(data.members)) { toast('不是有效备份文件'); return; }
   const cur = await DB.getAll('members');
-  if (!confirm(`确认导入？将覆盖当前 ${cur.length} 个会员的全部数据，恢复为备份文件中的 ${data.members.length} 个会员。`)) return;
+  const ok = await confirmDialog({
+    title: '覆盖现有数据？',
+    message: `将覆盖当前 ${cur.length} 个会员，恢复为备份文件中的 ${data.members.length} 个会员。`,
+    confirmText: '确认导入',
+    danger: true
+  });
+  if (!ok) return;
   await DB.importAll(data);
   Cloud.schedulePush();
   toast(`已恢复 ${data.members.length} 个会员 ✓`);

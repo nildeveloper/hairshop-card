@@ -1,11 +1,9 @@
-const CACHE = 'haircard-v15';
+const CACHE = 'haircard-v17';
 const ASSETS = ['./', './index.html', './manifest.json', './sw.js', './icon.svg'];
 
 self.addEventListener('install', e => {
   self.skipWaiting();
-  e.waitUntil(
-    caches.open(CACHE).then(c => c.addAll(ASSETS))
-  );
+  e.waitUntil(caches.open(CACHE).then(c => c.addAll(ASSETS)));
 });
 
 self.addEventListener('activate', e => {
@@ -18,7 +16,35 @@ self.addEventListener('activate', e => {
 });
 
 self.addEventListener('fetch', e => {
-  // cache-first: 离线优先读缓存
+  if (e.request.method !== 'GET') return;
+  const url = new URL(e.request.url);
+
+  // /api/* 永不走缓存
+  if (url.pathname.startsWith('/api/')) {
+    e.respondWith(fetch(e.request));
+    return;
+  }
+
+  const sameOrigin = url.origin === location.origin;
+  const isAppShell = sameOrigin && (
+    url.pathname === '/' ||
+    url.pathname.endsWith('/') ||
+    /\.(html|js|json)$/.test(url.pathname)
+  );
+
+  if (isAppShell) {
+    // 网络优先：保证更新及时；失败回退缓存
+    e.respondWith(
+      fetch(e.request).then(r => {
+        const copy = r.clone();
+        caches.open(CACHE).then(c => c.put(e.request, copy)).catch(() => {});
+        return r;
+      }).catch(() => caches.match(e.request).then(c => c || Response.error()))
+    );
+    return;
+  }
+
+  // 其他（图标等）：缓存优先
   e.respondWith(
     caches.match(e.request).then(cached => cached || fetch(e.request))
   );

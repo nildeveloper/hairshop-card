@@ -11,6 +11,7 @@
 <link rel="manifest" href="./manifest.json">
 <link rel="apple-touch-icon" href="./icon.svg">
 <title>次卡管理 · 理发店</title>
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 :root{
@@ -301,6 +302,7 @@ body{
 <body>
 <div id="cloud-indicator"></div>
 <div id="app"></div>
+<div id="ts-host" style="position:fixed;bottom:0;right:0;width:0;height:0;overflow:hidden;pointer-events:none"></div>
 <nav id="tabs">
   <button class="tab on" id="tab-home" onclick="goTab('home')">
     <span class="tab-ic">🏠</span><span class="tab-lb">仪表盘</span>
@@ -424,47 +426,39 @@ const Cloud = (() => {
   const TURNSTILE_SITEKEY = '0x4AAAAAADej9dJ2nBUuYEx5';
   let cfg = null, timer = null, busy = false;
 
-  // ── Turnstile：懒加载脚本，invisible 模式拿一次性 token ──
-  let _tsLoadPromise = null;
-  const loadTurnstile = () => {
-    if (!TURNSTILE_SITEKEY) return Promise.resolve(null);
-    if (_tsLoadPromise) return _tsLoadPromise;
-    _tsLoadPromise = new Promise((resolve, reject) => {
-      if (window.turnstile) return resolve(window.turnstile);
-      const s = document.createElement('script');
-      s.src = 'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit';
-      s.async = true; s.defer = true;
-      s.onload = () => resolve(window.turnstile);
-      s.onerror = () => { _tsLoadPromise = null; reject(new Error('turnstile script load failed')); };
-      document.head.appendChild(s);
-    });
-    return _tsLoadPromise;
-  };
+  // ── Turnstile：HTML 头已静态预加载脚本，这里只等 window.turnstile 就绪 ──
+  // 走官方 demo 同款"静态预加载 + 固定容器 + 显式 render"，避免动态注入触发 Chrome
+  // 对 about:blank 匿名 iframe 的沙箱保护（错误码 600010 / Blocked script execution）
+  const waitTurnstile = () => new Promise((resolve, reject) => {
+    if (!TURNSTILE_SITEKEY) return resolve(null);
+    if (window.turnstile) return resolve(window.turnstile);
+    let waited = 0;
+    const iv = setInterval(() => {
+      if (window.turnstile) { clearInterval(iv); resolve(window.turnstile); return; }
+      waited += 100;
+      if (waited >= 5000) { clearInterval(iv); reject(new Error('turnstile script not loaded')); }
+    }, 100);
+  });
   const getTurnstileToken = async () => {
     if (!TURNSTILE_SITEKEY) return null;
-    const ts = await loadTurnstile();
+    const ts = await waitTurnstile();
     if (!ts) return null;
-    const c = document.createElement('div');
-    // size:'invisible' 自身不渲染可见 UI；容器只需在 DOM 里有正常布局，
-    // 不要用 left:-9999px / display:none / visibility:hidden，
-    // 否则 Turnstile 反爬会判为可疑环境 → 报错 600010
-    c.style.cssText = 'position:fixed;left:0;top:0;width:0;height:0;overflow:hidden;pointer-events:none';
-    document.body.appendChild(c);
+    const host = document.getElementById('ts-host');
+    if (!host) throw new Error('turnstile host missing');
     return new Promise((resolve, reject) => {
       let done = false;
       let widgetId = null;
       const finish = (fn, val) => {
         if (done) return; done = true;
-        try { if (widgetId !== null) ts.remove(widgetId); } catch (e) {}
-        c.remove();
         fn(val);
+        // 延迟清理，避免和 Turnstile 内部异步 reset 抢位置抛 "Nothing to reset" 噪音
+        setTimeout(() => {
+          try { if (widgetId !== null && typeof ts.remove === 'function') ts.remove(widgetId); } catch (e) {}
+        }, 100);
       };
       try {
-        widgetId = ts.render(c, {
+        widgetId = ts.render('#ts-host', {
           sitekey: TURNSTILE_SITEKEY,
-          // 不传 size：invisible 行为由 dashboard 里 widget mode 控制（Cloudflare 已弃用 size:'invisible'）
-          // 默认 execution:'render'：render 之后自动开解题，解完调 callback
-          appearance: 'execute',  // 仅在确实需要交互时才显示 UI，invisible 模式下永远不显示
           callback: token => finish(resolve, token),
           'error-callback': (err) => { console.warn('[turnstile] error-callback:', err); finish(reject, new Error('turnstile error: ' + (err || 'unknown'))); },
           'expired-callback': () => finish(reject, new Error('turnstile token expired')),

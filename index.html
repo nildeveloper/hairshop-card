@@ -463,8 +463,9 @@ const Cloud = (() => {
       try {
         widgetId = ts.render(c, {
           sitekey: TURNSTILE_SITEKEY,
-          size: 'invisible',
+          // 不传 size：invisible 行为由 dashboard 里 widget mode 控制（Cloudflare 已弃用 size:'invisible'）
           // 默认 execution:'render'：render 之后自动开解题，解完调 callback
+          appearance: 'execute',  // 仅在确实需要交互时才显示 UI，invisible 模式下永远不显示
           callback: token => finish(resolve, token),
           'error-callback': (err) => { console.warn('[turnstile] error-callback:', err); finish(reject, new Error('turnstile error: ' + (err || 'unknown'))); },
           'expired-callback': () => finish(reject, new Error('turnstile token expired')),

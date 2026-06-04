@@ -449,16 +449,28 @@ const Cloud = (() => {
     document.body.appendChild(c);
     return new Promise((resolve, reject) => {
       let done = false;
-      const finish = (fn, val) => { if (done) return; done = true; try { ts.remove(widgetId); } catch (e) {} c.remove(); fn(val); };
-      const widgetId = ts.render(c, {
-        sitekey: TURNSTILE_SITEKEY,
-        size: 'invisible',
-        callback: token => finish(resolve, token),
-        'error-callback': () => finish(reject, new Error('turnstile error')),
-        'expired-callback': () => finish(reject, new Error('turnstile expired')),
-      });
-      ts.execute(widgetId);
-      setTimeout(() => finish(reject, new Error('turnstile timeout')), 10000);
+      let widgetId = null;
+      const finish = (fn, val) => {
+        if (done) return; done = true;
+        try { if (widgetId !== null) ts.remove(widgetId); } catch (e) {}
+        c.remove();
+        fn(val);
+      };
+      try {
+        widgetId = ts.render(c, {
+          sitekey: TURNSTILE_SITEKEY,
+          size: 'invisible',
+          // 默认 execution:'render'：render 之后自动开解题，解完调 callback
+          callback: token => finish(resolve, token),
+          'error-callback': (err) => { console.warn('[turnstile] error-callback:', err); finish(reject, new Error('turnstile error: ' + (err || 'unknown'))); },
+          'expired-callback': () => finish(reject, new Error('turnstile token expired')),
+          'timeout-callback': () => finish(reject, new Error('turnstile challenge timeout')),
+        });
+      } catch (e) {
+        finish(reject, new Error('turnstile render failed: ' + e.message));
+        return;
+      }
+      setTimeout(() => finish(reject, new Error('turnstile overall timeout')), 15000);
     });
   };
 

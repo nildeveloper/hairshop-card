@@ -423,7 +423,9 @@ const Cloud = (() => {
   const LS = 'haircard_cloud';
   const ENDPOINT = '/api/data';
   // 填上 Cloudflare Turnstile sitekey 以启用 PUT 人机校验；留空则跳过（开发期）
-  const TURNSTILE_SITEKEY = '0x4AAAAAADej9dJ2nBUuYEx5';
+  // 临时诊断：Cloudflare 官方 always-pass test sitekey（visible managed mode），用于排除前端代码问题
+  // 跑通后改回真实 sitekey '0x4AAAAAADej9dJ2nBUuYEx5'
+  const TURNSTILE_SITEKEY = '1x00000000000000000000AA';
   let cfg = null, timer = null, busy = false;
 
   // ── Turnstile：HTML 头已静态预加载脚本，这里只等 window.turnstile 就绪 ──

@@ -11,7 +11,6 @@
 <link rel="manifest" href="./manifest.json">
 <link rel="apple-touch-icon" href="./icon.svg">
 <title>次卡管理 · 理发店</title>
-<script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
 :root{
@@ -302,7 +301,6 @@ body{
 <body>
 <div id="cloud-indicator"></div>
 <div id="app"></div>
-<div id="ts-host" style="position:fixed;left:10px;top:10px;width:300px;height:65px;z-index:99999;background:rgba(255,0,0,.1);border:2px dashed red"></div>
 <nav id="tabs">
   <button class="tab on" id="tab-home" onclick="goTab('home')">
     <span class="tab-ic">🏠</span><span class="tab-lb">仪表盘</span>
@@ -422,56 +420,7 @@ const DB = (() => {
 const Cloud = (() => {
   const LS = 'haircard_cloud';
   const ENDPOINT = '/api/data';
-  // 填上 Cloudflare Turnstile sitekey 以启用 PUT 人机校验；留空则跳过（开发期）
-  // 临时诊断：Cloudflare 官方 always-pass test sitekey（visible managed mode），用于排除前端代码问题
-  const TURNSTILE_SITEKEY = '0x4AAAAAADenjNWzGB82xVKD';
   let cfg = null, timer = null, busy = false;
-
-  // ── Turnstile：HTML 头已静态预加载脚本，这里只等 window.turnstile 就绪 ──
-  // 走官方 demo 同款"静态预加载 + 固定容器 + 显式 render"，避免动态注入触发 Chrome
-  // 对 about:blank 匿名 iframe 的沙箱保护（错误码 600010 / Blocked script execution）
-  const waitTurnstile = () => new Promise((resolve, reject) => {
-    if (!TURNSTILE_SITEKEY) return resolve(null);
-    if (window.turnstile) return resolve(window.turnstile);
-    let waited = 0;
-    const iv = setInterval(() => {
-      if (window.turnstile) { clearInterval(iv); resolve(window.turnstile); return; }
-      waited += 100;
-      if (waited >= 5000) { clearInterval(iv); reject(new Error('turnstile script not loaded')); }
-    }, 100);
-  });
-  const getTurnstileToken = async () => {
-    if (!TURNSTILE_SITEKEY) return null;
-    const ts = await waitTurnstile();
-    if (!ts) return null;
-    const host = document.getElementById('ts-host');
-    if (!host) throw new Error('turnstile host missing');
-    return new Promise((resolve, reject) => {
-      let done = false;
-      let widgetId = null;
-      const finish = (fn, val) => {
-        if (done) return; done = true;
-        fn(val);
-        // 延迟清理，避免和 Turnstile 内部异步 reset 抢位置抛 "Nothing to reset" 噪音
-        setTimeout(() => {
-          try { if (widgetId !== null && typeof ts.remove === 'function') ts.remove(widgetId); } catch (e) {}
-        }, 100);
-      };
-      try {
-        widgetId = ts.render('#ts-host', {
-          sitekey: TURNSTILE_SITEKEY,
-          callback: token => finish(resolve, token),
-          'error-callback': (err) => { console.warn('[turnstile] error-callback:', err); finish(reject, new Error('turnstile error: ' + (err || 'unknown'))); },
-          'expired-callback': () => finish(reject, new Error('turnstile token expired')),
-          'timeout-callback': () => finish(reject, new Error('turnstile challenge timeout')),
-        });
-      } catch (e) {
-        finish(reject, new Error('turnstile render failed: ' + e.message));
-        return;
-      }
-      setTimeout(() => finish(reject, new Error('turnstile overall timeout')), 15000);
-    });
-  };
 
   try { cfg = JSON.parse(localStorage.getItem(LS) || 'null'); } catch { cfg = null; }
 
@@ -496,6 +445,24 @@ const Cloud = (() => {
     const hex = await sha256(`${shopKey}:${password}:haircard-enc-v1`);
     const raw = new Uint8Array(hex.match(/.{2}/g).map(b => parseInt(b, 16)));
     return crypto.subtle.importKey('raw', raw, {name:'AES-GCM'}, false, ['encrypt','decrypt']);
+  };
+
+  // HMAC-SHA256 验签密钥派生（与 hashedKey / encKey 都独立的 namespace）
+  // 服务端用首次 PUT 时 x-init 携带的 verifier hex 注册，之后每次 PUT 验签
+  const deriveAuthInfo = async (shopKey, password) => {
+    const hex = await sha256(`${shopKey}:${password}:haircard-auth-v1`);
+    const raw = new Uint8Array(hex.match(/.{2}/g).map(b => parseInt(b, 16)));
+    const key = await crypto.subtle.importKey('raw', raw, {name:'HMAC', hash:'SHA-256'}, false, ['sign']);
+    return { key, verifierHex: hex };
+  };
+
+  // HMAC over `PUT|${hashedKey}|${ts}|${sha256_hex(body)}`
+  const computeSig = async (authKey, hashedKey, ts, body) => {
+    const bodyHashBuf = await crypto.subtle.digest('SHA-256', body);
+    const bodyHashHex = Array.from(new Uint8Array(bodyHashBuf), b => b.toString(16).padStart(2,'0')).join('');
+    const msg = new TextEncoder().encode(`PUT|${hashedKey}|${ts}|${bodyHashHex}`);
+    const sig = await crypto.subtle.sign('HMAC', authKey, msg);
+    return Array.from(new Uint8Array(sig), b => b.toString(16).padStart(2,'0')).join('');
   };
 
   // 加密：JSON → gzip → AES-GCM → [0x48, iv(12), ciphertext]
@@ -701,20 +668,22 @@ const Cloud = (() => {
         const jsonStr = JSON.stringify({data, modifiedAt: Date.now(), v: 1});
         const encKey = await deriveEncKey(cfg.shopKey, cfg.password);
         const encrypted = await enc(jsonStr, encKey);
-        const headers = {'content-type':'application/octet-stream'};
-        try {
-          const tsToken = await getTurnstileToken();
-          if (tsToken) headers['cf-turnstile-token'] = tsToken;
-        } catch (e) {
-          // 拿不到 token 也照样发；服务端会决定接不接
-          console.warn('[sync] turnstile token unavailable:', e.message);
-        }
+        const { key: authKey, verifierHex } = await deriveAuthInfo(cfg.shopKey, cfg.password);
+        const ts = Math.floor(Date.now() / 1000).toString();
+        const sig = await computeSig(authKey, cfg.hashedKey, ts, encrypted);
         const r = await fetch(`${ENDPOINT}?key=${cfg.hashedKey}`, {
           method:'PUT',
-          headers,
+          headers: {
+            'content-type':'application/octet-stream',
+            'x-ts': ts,
+            'x-sig': sig,
+            // x-init 始终带上；服务端只在首次写入（KV 还没存 verifier）时使用，已注册则忽略
+            'x-init': verifierHex,
+          },
           body: encrypted
         });
-        if (r.status === 403) throw new Error('人机校验失败');
+        if (r.status === 401) throw new Error('验签失败');
+        if (r.status === 429) throw new Error('今日写入次数已达上限');
         if (r.status === 503) throw new Error('云端今日写入额度已满，明天再试');
         if (!r.ok) throw new Error('http '+r.status);
         cfg.lastSync = Date.now();

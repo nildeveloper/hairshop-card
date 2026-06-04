@@ -1,4 +1,4 @@
-const CACHE = 'haircard-v29';
+const CACHE = 'haircard-v30';
 const ASSETS = ['./', './index.html', './manifest.json', './sw.js', './icon.svg'];
 
 self.addEventListener('install', e => {
@@ -19,8 +19,7 @@ self.addEventListener('fetch', e => {
   if (e.request.method !== 'GET') return;
   const url = new URL(e.request.url);
 
-  // 跨域请求（Turnstile challenge iframe、第三方 CDN 等）一律不介入，
-  // 让浏览器原生处理，避免 SW 转发破坏第三方 iframe 的安全语义。
+  // 跨域请求（第三方 CDN 等）一律不介入，让浏览器原生处理。
   if (url.origin !== location.origin) return;
 
   // /api/* 永不走缓存
